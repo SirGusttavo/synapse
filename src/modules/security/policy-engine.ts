@@ -1,6 +1,11 @@
 import type { SynapseConfig } from "../../config/schema.js";
 import { PolicyDeniedError } from "../../core/errors.js";
 import type { ApprovalStatus, OperationRequest, PermissionLevel } from "../../core/types.js";
+import {
+  assertSafeCloneUrl,
+  assertSafeGitPaths,
+  assertSafeGitRef,
+} from "../git-manager/preflight.js";
 import { analyzeShellCommand } from "./command-analyzer.js";
 import { redactValue } from "./redactor.js";
 import {
@@ -359,6 +364,8 @@ export class PolicyEngine implements IPolicyEngine {
       };
     } else if (request.category === "file") {
       base = this.classifyFileOperation(request, canonicalWorkingDirectory);
+    } else if (request.category === "git") {
+      base = this.classifyGitOperation(request, canonicalWorkingDirectory);
     } else {
       // RNF-01: Strict deny-by-default for unmapped/unknown operations
       return {
@@ -378,6 +385,304 @@ export class PolicyEngine implements IPolicyEngine {
     }
 
     return base;
+  }
+
+  private classifyGitOperation(
+    request: Readonly<OperationRequest>,
+    canonicalWorkingDirectory: string,
+  ): {
+    level: PermissionLevel;
+    reasons: string[];
+    detectedRisks: string[];
+  } {
+    const input = request.input;
+
+    // Hard block any attempt to smuggle destructive flags via tool input
+    if (input.force === true || input.hard === true || input.forceWithLease === true) {
+      return {
+        level: "DENIED",
+        reasons: ["Destructive Git flags (force / hard) are blocked by default policy"],
+        detectedRisks: ["git_destructive_flag"],
+      };
+    }
+
+    try {
+      switch (request.toolName) {
+        case "git.status":
+          return {
+            level: "AUTO",
+            reasons: ["git.status is a read-only operation within the workspace"],
+            detectedRisks: [],
+          };
+
+        case "git.diff": {
+          if (typeof input.target === "string") {
+            assertSafeGitRef(input.target, "diff target");
+          }
+          if (Array.isArray(input.paths)) {
+            const paths = input.paths.filter((p): p is string => typeof p === "string");
+            assertSafeGitPaths(this.workspaceDir, canonicalWorkingDirectory, paths, {
+              allowOutsideWorkspace: this.securityConfig.allowOutsideWorkspace,
+              forbidSensitive: true,
+            });
+          }
+          return {
+            level: "AUTO",
+            reasons: ["git.diff is a read-only operation within the workspace"],
+            detectedRisks: [],
+          };
+        }
+
+        case "git.log": {
+          if (typeof input.ref === "string") {
+            assertSafeGitRef(input.ref, "log ref");
+          }
+          return {
+            level: "AUTO",
+            reasons: ["git.log is a read-only operation within the workspace"],
+            detectedRisks: [],
+          };
+        }
+
+        case "git.branch": {
+          const action = typeof input.action === "string" ? input.action : "list";
+          if (action === "list") {
+            return {
+              level: "AUTO",
+              reasons: ["Listing Git branches is a read-only operation"],
+              detectedRisks: [],
+            };
+          }
+          if (typeof input.name !== "string") {
+            return {
+              level: "DENIED",
+              reasons: [`git.branch action '${action}' requires a valid branch name`],
+              detectedRisks: ["invalid_git_ref"],
+            };
+          }
+          assertSafeGitRef(input.name, "branch name");
+          if (typeof input.startPoint === "string") {
+            assertSafeGitRef(input.startPoint, "branch startPoint");
+          }
+          if (action === "create") {
+            return {
+              level: "CONDITIONAL",
+              reasons: ["Creating a Git branch requires conditional validation"],
+              detectedRisks: ["git_branch_create"],
+            };
+          }
+          if (action === "delete") {
+            return {
+              level: "HUMAN_APPROVAL",
+              reasons: ["Deleting a Git branch requires explicit human approval"],
+              detectedRisks: ["git_branch_delete"],
+            };
+          }
+          return {
+            level: "DENIED",
+            reasons: [`Unsupported git.branch action '${action}'`],
+            detectedRisks: ["invalid_git_action"],
+          };
+        }
+
+        case "git.tag": {
+          const action = typeof input.action === "string" ? input.action : "list";
+          if (action === "list") {
+            return {
+              level: "AUTO",
+              reasons: ["Listing Git tags is a read-only operation"],
+              detectedRisks: [],
+            };
+          }
+          if (typeof input.name !== "string") {
+            return {
+              level: "DENIED",
+              reasons: [`git.tag action '${action}' requires a valid tag name`],
+              detectedRisks: ["invalid_git_ref"],
+            };
+          }
+          assertSafeGitRef(input.name, "tag name");
+          if (typeof input.target === "string") {
+            assertSafeGitRef(input.target, "tag target");
+          }
+          if (action === "create") {
+            return {
+              level: "CONDITIONAL",
+              reasons: ["Creating a Git tag requires conditional validation"],
+              detectedRisks: ["git_tag_create"],
+            };
+          }
+          if (action === "delete") {
+            return {
+              level: "HUMAN_APPROVAL",
+              reasons: ["Deleting a Git tag requires explicit human approval"],
+              detectedRisks: ["git_tag_delete"],
+            };
+          }
+          return {
+            level: "DENIED",
+            reasons: [`Unsupported git.tag action '${action}'`],
+            detectedRisks: ["invalid_git_action"],
+          };
+        }
+
+        case "git.init": {
+          const branch = typeof input.initialBranch === "string" ? input.initialBranch : "main";
+          assertSafeGitRef(branch, "initialBranch");
+          return {
+            level: "CONDITIONAL",
+            reasons: ["Initializing a Git repository requires conditional validation"],
+            detectedRisks: ["git_init"],
+          };
+        }
+
+        case "git.clone": {
+          if (typeof input.url !== "string" || typeof input.directory !== "string") {
+            return {
+              level: "DENIED",
+              reasons: ["git.clone requires valid 'url' and 'directory' strings"],
+              detectedRisks: ["invalid_git_clone"],
+            };
+          }
+          assertSafeCloneUrl(input.url);
+          if (typeof input.branch === "string") {
+            assertSafeGitRef(input.branch, "clone branch");
+          }
+          const dirInfo = inspectWorkspacePath(
+            this.workspaceDir,
+            canonicalWorkingDirectory,
+            input.directory,
+          );
+          if (!dirInfo.insideWorkspace && !this.securityConfig.allowOutsideWorkspace) {
+            return {
+              level: "DENIED",
+              reasons: [`Clone target directory escapes authorized workspace: ${input.directory}`],
+              detectedRisks: ["workspace_escape"],
+            };
+          }
+          return {
+            level: dirInfo.insideWorkspace ? "CONDITIONAL" : "HUMAN_APPROVAL",
+            reasons: ["Cloning a remote repository requires validation/approval"],
+            detectedRisks: ["git_clone"],
+          };
+        }
+
+        case "git.checkout": {
+          if (typeof input.target !== "string") {
+            return {
+              level: "DENIED",
+              reasons: ["git.checkout requires a valid target branch or ref"],
+              detectedRisks: ["invalid_git_ref"],
+            };
+          }
+          assertSafeGitRef(input.target, "checkout target");
+          return {
+            level: "CONDITIONAL",
+            reasons: ["Switching branches with git.checkout requires conditional validation"],
+            detectedRisks: ["git_checkout"],
+          };
+        }
+
+        case "git.add": {
+          if (!Array.isArray(input.paths) || input.paths.length === 0) {
+            return {
+              level: "DENIED",
+              reasons: ["git.add requires a non-empty array of paths"],
+              detectedRisks: ["invalid_git_paths"],
+            };
+          }
+          const paths = input.paths.filter((p): p is string => typeof p === "string");
+          if (paths.length !== input.paths.length) {
+            return {
+              level: "DENIED",
+              reasons: ["All git.add paths must be strings"],
+              detectedRisks: ["invalid_git_paths"],
+            };
+          }
+          assertSafeGitPaths(this.workspaceDir, canonicalWorkingDirectory, paths, {
+            allowOutsideWorkspace: this.securityConfig.allowOutsideWorkspace,
+            forbidSensitive: true,
+          });
+          return {
+            level: "CONDITIONAL",
+            reasons: ["Staging files with git.add requires conditional validation"],
+            detectedRisks: ["git_add"],
+          };
+        }
+
+        case "git.commit": {
+          if (typeof input.message !== "string" || input.message.trim().length === 0) {
+            return {
+              level: "DENIED",
+              reasons: ["git.commit requires a non-empty commit message"],
+              detectedRisks: ["invalid_commit_message"],
+            };
+          }
+          return {
+            level: "CONDITIONAL",
+            reasons: ["Creating a Git commit requires conditional validation/approval"],
+            detectedRisks: ["git_commit"],
+          };
+        }
+
+        case "git.pull": {
+          const remote = typeof input.remote === "string" ? input.remote : "origin";
+          assertSafeGitRef(remote, "pull remote");
+          if (typeof input.branch === "string") {
+            assertSafeGitRef(input.branch, "pull branch");
+          }
+          return {
+            level: "CONDITIONAL",
+            reasons: ["Pulling changes from remote requires conditional validation/approval"],
+            detectedRisks: ["git_pull"],
+          };
+        }
+
+        case "git.push": {
+          const remote = typeof input.remote === "string" ? input.remote : "origin";
+          assertSafeGitRef(remote, "push remote");
+          if (typeof input.branch === "string") {
+            assertSafeGitRef(input.branch, "push branch");
+          }
+          return {
+            level: "HUMAN_APPROVAL",
+            reasons: ["Publishing commits with git.push requires explicit human approval"],
+            detectedRisks: ["git_push"],
+          };
+        }
+
+        case "git.merge": {
+          if (typeof input.branch !== "string") {
+            return {
+              level: "DENIED",
+              reasons: ["git.merge requires a valid branch name"],
+              detectedRisks: ["invalid_git_ref"],
+            };
+          }
+          assertSafeGitRef(input.branch, "merge branch");
+          return {
+            level: "CONDITIONAL",
+            reasons: ["Merging a branch requires conditional validation/approval"],
+            detectedRisks: ["git_merge"],
+          };
+        }
+
+        default:
+          return {
+            level: "DENIED",
+            reasons: [`Unmapped Git operation '${request.toolName}' is denied by default policy`],
+            detectedRisks: ["unmapped_operation"],
+          };
+      }
+    } catch (error) {
+      const reason =
+        error instanceof PolicyDeniedError ? error.message : "Git parameter validation failed";
+      return {
+        level: "DENIED",
+        reasons: [reason],
+        detectedRisks: ["git_policy_violation"],
+      };
+    }
   }
 
   private classifyFileOperation(
