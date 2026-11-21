@@ -7,6 +7,8 @@ import {
   NodeProcessRunner,
   ToolRegistry,
 } from "../modules/execution-engine/index.js";
+import { createFileTools, FileManager } from "../modules/file-manager/index.js";
+import { createGitTools, GitManager } from "../modules/git-manager/index.js";
 import {
   type IApprovalHandler,
   NonInteractiveApprovalHandler,
@@ -26,7 +28,7 @@ import {
   SynapseDatabase,
 } from "../storage/index.js";
 import { SynapseEventBus } from "./events.js";
-import type { AuditEventRecord, TaskRecord } from "./types.js";
+import type { AuditEventRecord, OperationCategory, TaskRecord } from "./types.js";
 
 export interface CreateRuntimeOptions extends LoadConfigOptions {
   approvalHandler?: IApprovalHandler | ((config: SynapseConfig) => IApprovalHandler);
@@ -54,6 +56,8 @@ export class SynapseRuntime {
   public readonly auditService: AuditService;
   public readonly taskManager: TaskManager;
   public readonly shellManager: ShellManager;
+  public readonly fileManager: FileManager;
+  public readonly gitManager: GitManager;
   public readonly toolRegistry: ToolRegistry;
 
   private readonly database: SynapseDatabase;
@@ -67,6 +71,8 @@ export class SynapseRuntime {
     auditService: AuditService;
     taskManager: TaskManager;
     shellManager: ShellManager;
+    fileManager: FileManager;
+    gitManager: GitManager;
     toolRegistry: ToolRegistry;
   }) {
     this.config = params.config;
@@ -77,6 +83,8 @@ export class SynapseRuntime {
     this.auditService = params.auditService;
     this.taskManager = params.taskManager;
     this.shellManager = params.shellManager;
+    this.fileManager = params.fileManager;
+    this.gitManager = params.gitManager;
     this.toolRegistry = params.toolRegistry;
   }
 
@@ -126,8 +134,26 @@ export class SynapseRuntime {
       extraBlockedEnvPatterns: config.security.extraBlockedEnvPatterns,
     });
 
+    const fileManager = new FileManager({
+      workspaceDir: config.workspaceDir,
+      allowOutsideWorkspace: config.security.allowOutsideWorkspace,
+    });
+
+    const gitManager = new GitManager({
+      processRunner,
+      workspaceDir: config.workspaceDir,
+      allowOutsideWorkspace: config.security.allowOutsideWorkspace,
+      extraBlockedEnvPatterns: config.security.extraBlockedEnvPatterns,
+    });
+
     const toolRegistry = new ToolRegistry();
     toolRegistry.register(createShellExecTool(shellManager));
+    for (const fileTool of createFileTools(fileManager)) {
+      toolRegistry.register(fileTool);
+    }
+    for (const gitTool of createGitTools(gitManager)) {
+      toolRegistry.register(gitTool);
+    }
 
     const executionEngine = new ExecutionEngine({
       registry: toolRegistry,
@@ -152,8 +178,39 @@ export class SynapseRuntime {
       auditService,
       taskManager,
       shellManager,
+      fileManager,
+      gitManager,
       toolRegistry,
     });
+  }
+
+  public async executeTool(
+    toolName: string,
+    category: OperationCategory,
+    input: Record<string, unknown>,
+    options?: {
+      cwd?: string;
+      timeoutMs?: number;
+      actor?: string;
+      sessionId?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<TaskRunOutcome> {
+    const workingDirectory = options?.cwd ?? this.config.workspaceDir;
+    return this.taskManager.submitAndRun(
+      {
+        toolName,
+        category,
+        input,
+        workingDirectory,
+        actor: options?.actor ?? "cli-operator",
+        sessionId: options?.sessionId,
+      },
+      {
+        timeoutMs: options?.timeoutMs,
+        externalSignal: options?.signal,
+      },
+    );
   }
 
   public async executeShellCommand(
@@ -166,23 +223,14 @@ export class SynapseRuntime {
       signal?: AbortSignal;
     },
   ): Promise<TaskRunOutcome> {
-    const workingDirectory = options?.cwd ?? this.config.workspaceDir;
-    return this.taskManager.submitAndRun(
+    return this.executeTool(
+      "shell.exec",
+      "shell",
       {
-        toolName: "shell.exec",
-        category: "shell",
-        input: {
-          command,
-          ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-        },
-        workingDirectory,
-        actor: options?.actor ?? "cli-operator",
-        sessionId: options?.sessionId,
+        command,
+        ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       },
-      {
-        timeoutMs: options?.timeoutMs,
-        externalSignal: options?.signal,
-      },
+      options,
     );
   }
 

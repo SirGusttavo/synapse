@@ -20,27 +20,25 @@ Para evitar qualquer conflito entre essas diretrizes, o plano adota **Segurança
 
 ---
 
-### FASE 1 — Core e Execução Controlada *(Concluída — Aguardando Revisão para Fase 2)*
+### FASE 1 — Core e Execução Controlada *(Concluída, Auditada e Publicada)*
 - [x] Bootstrap do projeto TypeScript (`strict`, ESM), `package.json`, `tsconfig.json`, `vitest.config.ts`, `biome.json`, `.gitignore` e `.env.example`.
 - [x] Camada `config` (JSON/JSONC + `.env` isolado + Zod) e persistência SQLite (`node:sqlite` + migrations v1).
 - [x] Security Baseline e Auditoria (`PolicyEngine`, `CommandAnalyzer`, `WorkspaceGuard`, `EnvSanitizer`, `Redactor`, Pino + `audit_events`).
 - [x] `Execution Engine` (`ToolRegistry`, `NodeProcessRunner` com `shell: false`, timeout, `AbortSignal`, truncamento por byte e encerramento de árvore no Windows).
-- [x] `Shell Manager` + `PowerShellAdapter` (`pwsh.exe` prioritário, UTF-8 forçado, propagação fiel de códigos de saída).
+- [x] `Shell Manager` + `PowerShellAdapter` (`pwsh.exe` prioritário, UTF-8 forçado, wrapper isolado via Base64 e propagação fiel de códigos de saída).
 - [x] `Task Manager` (criação de tarefa, máquina de estados validada e cancelamento).
 - [x] CLI funcional (`synapse exec`, `synapse status`, `synapse audit`, `synapse config`) consumindo `SynapseRuntime` desacoplado.
-- [x] Testes unitários, de integração reais no Windows e de segurança aprovados no Vitest (`npm run verify` + `npm run build`).
+- [x] Auditoria técnica e de segurança concluída com suíte adversarial (`tests/security/adversarial-audit.test.ts`).
 
 ---
 
-### FASE 2 — Sistema de Arquivos e Git
-- **Escopo técnico:**
-  - `WorkspaceGuard` (resolução canônica, bloqueio de traversal/symlinks externos e proteção de arquivos sensíveis).
-  - `File Manager` (`list`, `read`, `create`, `edit`, `search`, `move`, `delete` controlado) registrado como conjunto de ferramentas no `ToolRegistry`.
-  - `Git Manager` (`init`, `clone`, `status`, `diff`, `log`, `branch`, `checkout`, `add`, `commit`, `pull`, `push`, `merge`, `tag`) via `spawn` com `shell: false`.
-  - `GitPreflight` (verificações de repositório, branch, working tree e bloqueio padrão de `--force`, `--hard`, `clean -fd`).
-  - `WorkspaceLock` no `Task Manager` serializando operações mutáveis no mesmo workspace.
-  - Subcomandos CLI de verificação e inspeção + testes de integração em repositórios Git temporários isolados.
-- **Critério de conclusão da Fase 2:** todas as operações de arquivo e Git validadas em workspaces temporários com proteção contra escape de diretório, bloqueio de flags destrutivas e concorrência controlada.
+### FASE 2 — Sistema de Arquivos e Git *(Concluída — Aguardando Revisão para Fase 3)*
+- [x] `WorkspaceLock` (RWLock justo FIFO por workspace canônico, leituras concorrentes e mutações exclusivas com suporte a `AbortSignal`).
+- [x] Amarração criptográfica de parâmetros (`inputDigest` SHA-256 em `AuthorizedOperation`) e revalidação pré-mutação (`PolicyEngine.revalidateAuthorized`).
+- [x] `File Manager` tipado (`file.list`, `file.read`, `file.create`, `file.edit`, `file.search`, `file.move`, `file.delete`) com escrita atômica, detecção de binários e confinamento via `WorkspaceGuard` sem depender de `shell.exec`.
+- [x] `Git Manager` tipado (`git.status`, `git.diff`, `git.log`, `git.branch`, `git.tag`, `git.init`, `git.clone`, `git.checkout`, `git.add`, `git.commit`, `git.pull`, `git.push`, `git.merge`) via `NodeProcessRunner` com `shell: false`.
+- [x] `GitPreflight` com defesa contra *option injection*, bloqueio de commit de arquivos sensíveis e contenção obrigatória de hooks (`-c core.hooksPath=.git/__synapse_disabled_hooks__`, `-c core.fsmonitor=false`, `-c protocol.ext.allow=never`).
+- [x] Subcomandos CLI `synapse file` e `synapse git` + testes de integração, concorrência e segurança aprovados no Vitest.
 
 ---
 
