@@ -8,21 +8,67 @@
 
 ## Status do Projeto
 
-- **Fase atual:** Fase 1 — Core (em desenvolvimento)
-- **Fase 0:** Concluída e aprovada (decisões D-01 a D-06 registradas em [08 — Decisões Arquiteturais](docs/08-decisoes-pendentes.md)).
+- **Fase 0 (Discovery e Arquitetura):** Concluída e aprovada ([08 — Decisões Arquiteturais](docs/08-decisoes-pendentes.md)).
+- **Fase 1 (Core):** Concluída localmente — aguardando revisão para avançar à Fase 2 (Sistema de Arquivos e Git).
 - **Repositório oficial:** `https://github.com/SirGusttavo/synapse.git`
 
-## O que é o SYNAPSE
+## O que está implementado (Fase 1 — Core)
 
-O **SYNAPSE** é uma camada intermediária modular, auditável e segura que conecta agentes de inteligência artificial ao ambiente operacional de computadores. Em vez de acoplar um modelo específico a scripts ad-hoc ou a um terminal simples, o SYNAPSE fornece uma infraestrutura padronizada para:
+- **Configuração JSON/JSONC validada com Zod** (`src/config/`) com suporte a `.synapse/config.jsonc` e carregamento isolado de `.env` local (D-02, D-03).
+- **Persistência local com `node:sqlite`** (`src/storage/`) e migrations versionadas (`tasks` e `audit_events`).
+- **Security Baseline ativa desde o início** (`src/modules/security/`):
+  - `Redactor` centralizado para mascarar tokens/chaves/senhas em textos e objetos;
+  - `EnvSanitizer` bloqueando propagação de segredos aos processos filhos;
+  - `WorkspaceGuard` impedindo escape do workspace e acesso a arquivos sensíveis;
+  - `CommandAnalyzer` com análise estrutural de comandos, flags, encadeamento e ofuscação;
+  - `PolicyEngine` (*default-deny*, D-06 com exclusão de arquivo individual em `HUMAN_APPROVAL`, autorização marcada via `Symbol` exigida pelo `ExecutionEngine`).
+- **Auditoria e Logging Estruturado** (`src/modules/audit/`): Pino (JSON com redaction em `stderr`) + trilha append-only em SQLite.
+- **Execução Controlada** (`src/modules/execution-engine/`, `src/modules/shell-manager/`, `src/modules/task-manager/`):
+  - `NodeProcessRunner` sobre `node:child_process` com **`shell: false`**, truncamento por byte, timeout e encerramento de árvore de processos no Windows (`taskkill /PID /T /F`);
+  - `PowerShellAdapter` priorizando `pwsh.exe` com fallback para `powershell.exe`, UTF-8 forçado e propagação fiel de códigos de saída;
+  - `TaskManager` com máquina de estados validada e cancelamento via `AbortSignal`.
+- **CLI desacoplada** (`src/cli/`) consumindo a fachada `SynapseRuntime` (`src/core/runtime.ts`).
 
-- Conectar múltiplos provedores de IA de forma desacoplada;
-- Interpretar chamadas de ferramentas (*tool calling*) com validação estrita de contratos;
-- Aplicar políticas de permissão e aprovações humanas antes de efeitos colaterais sensíveis;
-- Executar operações reais no sistema operacional (shell, arquivos e Git) com controle de processos e limites;
-- Registrar uma trilha de auditoria completa sem expor credenciais.
+---
 
-## Índice da Documentação (Fase 0)
+## Uso Rápido (Fase 1)
+
+Pré-requisitos: Node.js `>= 22.13.0` (validado em `v26.13.0`) e PowerShell no Windows.
+
+```powershell
+# Instalar dependências e compilar
+npm install
+npm run build
+
+# Verificar status do ambiente, shell detectado e política ativa
+node dist/cli/main.js status
+
+# Executar comando PowerShell autorizado pela allowlist (AUTO)
+node dist/cli/main.js exec "Write-Output 'SYNAPSE operacional'"
+
+# Testar bloqueio automático de comando destrutivo (DENIED -> exit 126)
+node dist/cli/main.js exec "git push --force origin main"
+
+# Consultar trilha de auditoria persistida no SQLite
+node dist/cli/main.js audit
+
+# Inspecionar configuração efetiva validada (sem expor segredos)
+node dist/cli/main.js config
+```
+
+### Scripts de Verificação
+
+```powershell
+npm run typecheck   # TypeScript strict (src + tests)
+npm run lint        # Biome check
+npm test            # Vitest (unitários, integração PowerShell/CLI e segurança)
+npm run verify      # typecheck + lint + test
+npm run build       # Compilação para dist/
+```
+
+---
+
+## Índice da Documentação
 
 | Documento | Conteúdo |
 | :--- | :--- |
@@ -33,7 +79,7 @@ O **SYNAPSE** é uma camada intermediária modular, auditável e segura que cone
 | [05 — Segurança e Matriz de Permissões](docs/05-seguranca-permissoes.md) | Defesa em profundidade, matriz de permissões, proteção de credenciais, auditoria e isolamento |
 | [06 — Riscos e Limitações](docs/06-riscos-limitacoes.md) | Riscos técnicos, operacionais, de segurança, de custos e limitações conhecidas |
 | [07 — Roadmap Técnico e Critérios do MVP](docs/07-roadmap-mvp.md) | Plano em fases (0 a 5), estratégia de segurança incremental e critérios objetivos de aceitação |
-| [08 — Decisões Pendentes](docs/08-decisoes-pendentes.md) | Decisões arquiteturais em aberto que exigem definição antes da Fase 1 |
+| [08 — Decisões Arquiteturais](docs/08-decisoes-pendentes.md) | Registro das decisões aprovadas (D-01 a D-07) |
 
 ---
 

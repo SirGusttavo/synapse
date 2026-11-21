@@ -13,24 +13,22 @@ Para evitar qualquer conflito entre essas diretrizes, o plano adota **Segurança
 
 ## 2. Roadmap Técnico Detalhado
 
-### FASE 0 — Discovery e Arquitetura *(Em conclusão — Aguardando Aprovação)*
+### FASE 0 — Discovery e Arquitetura *(Concluída e Aprovada)*
 - [x] Inspeção do ambiente local (Windows 11, Node.js v26.13.0, npm 11.20.0, PowerShell 7.7/5.1, Git 2.54, GCM autenticado).
 - [x] Inicialização do repositório Git na branch `main` e configuração do remoto `origin`.
-- [x] Documentação completa: visão, requisitos (RF/RNF), arquitetura, diagramas, estrutura de diretórios, stack, matriz de permissões, riscos, roadmap, critérios do MVP e decisões pendentes.
-- **Saída esperada:** aprovação explícita das decisões pendentes e autorização para iniciar a Fase 1.
+- [x] Documentação completa: visão, requisitos (RF/RNF), arquitetura, diagramas, estrutura de diretórios, stack, matriz de permissões, riscos, roadmap, critérios do MVP e decisões aprovadas (D-01 a D-06).
 
 ---
 
-### FASE 1 — Core e Execução Controlada
-- **Escopo técnico:**
-  - Bootstrap do projeto TypeScript (`strict`, ESM), `package.json`, `tsconfig.json`, `vitest.config.ts`, `.gitignore` e linter/formatter definido.
-  - Camada `config` (Zod) e persistência inicial SQLite (`node:sqlite` + migrations v1).
-  - Contratos base de segurança e auditoria (`IPolicyEngine` baseline, `EnvSanitizer`, `Redactor`, Pino + `audit_events` inicial).
-  - `Execution Engine` (`ToolRegistry`, `ProcessRunner` com timeout, `AbortSignal`, teto de saída e encerramento de árvore no Windows).
-  - `Shell Manager` + `PowerShellAdapter` (`pwsh` prioritário, UTF-8, tratamento de exit code).
-  - `Task Manager` básico (criação de tarefa, estados e cancelamento).
-  - CLI inicial funcional (`synapse exec`, `synapse status`, `synapse audit`) consumindo o núcleo desacoplado.
-- **Critério de conclusão da Fase 1:** executar comandos controlados via CLI + PowerShell com captura real de `stdout`/`stderr`/exit code, timeout funcionando sem processos órfãos, logs sanitizados e testes unitários/integração verdes no Vitest.
+### FASE 1 — Core e Execução Controlada *(Concluída — Aguardando Revisão para Fase 2)*
+- [x] Bootstrap do projeto TypeScript (`strict`, ESM), `package.json`, `tsconfig.json`, `vitest.config.ts`, `biome.json`, `.gitignore` e `.env.example`.
+- [x] Camada `config` (JSON/JSONC + `.env` isolado + Zod) e persistência SQLite (`node:sqlite` + migrations v1).
+- [x] Security Baseline e Auditoria (`PolicyEngine`, `CommandAnalyzer`, `WorkspaceGuard`, `EnvSanitizer`, `Redactor`, Pino + `audit_events`).
+- [x] `Execution Engine` (`ToolRegistry`, `NodeProcessRunner` com `shell: false`, timeout, `AbortSignal`, truncamento por byte e encerramento de árvore no Windows).
+- [x] `Shell Manager` + `PowerShellAdapter` (`pwsh.exe` prioritário, UTF-8 forçado, propagação fiel de códigos de saída).
+- [x] `Task Manager` (criação de tarefa, máquina de estados validada e cancelamento).
+- [x] CLI funcional (`synapse exec`, `synapse status`, `synapse audit`, `synapse config`) consumindo `SynapseRuntime` desacoplado.
+- [x] Testes unitários, de integração reais no Windows e de segurança aprovados no Vitest (`npm run verify` + `npm run build`).
 
 ---
 
