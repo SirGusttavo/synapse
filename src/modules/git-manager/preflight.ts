@@ -50,7 +50,7 @@ export function buildSafeGitGlobalArgs(): string[] {
     "-c",
     "protocol.ext.allow=never",
     "-c",
-    "protocol.file.allow=never",
+    "protocol.file.allow=user",
   ];
 }
 

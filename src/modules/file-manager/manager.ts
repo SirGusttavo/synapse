@@ -5,6 +5,7 @@ import { ExecutionError, PolicyDeniedError } from "../../core/errors.js";
 import type { ExecutionResult, ToolExecutionContext } from "../../core/types.js";
 import {
   inspectWorkspacePath,
+  isHardlinkedFile,
   isInternalGitPath,
   isPathWithinWorkspace,
   isSensitiveFilePath,
@@ -105,7 +106,7 @@ export class FileManager {
   private resolveSafePath(
     workingDirectory: string,
     targetPath: string,
-    options: { mutating: boolean; forbidWorkspaceRoot?: boolean },
+    options: { mutating: boolean; forbidWorkspaceRoot?: boolean; allowHardlinkDelete?: boolean },
   ): string {
     const info = inspectWorkspacePath(this.workspaceDir, workingDirectory, targetPath);
 
@@ -113,6 +114,18 @@ export class FileManager {
       throw new PolicyDeniedError(`Path escapes authorized workspace: ${targetPath}`, {
         details: { targetPath },
       });
+    }
+    if (info.hasReparsePoint) {
+      throw new PolicyDeniedError(
+        `Path traverses a symbolic link or NTFS junction inside the workspace: ${targetPath}`,
+        { details: { targetPath } },
+      );
+    }
+    if (info.isHardlinked && !options.allowHardlinkDelete) {
+      throw new PolicyDeniedError(
+        `Access to hardlinked file (nlink > 1) is blocked to prevent credential aliasing: ${targetPath}`,
+        { details: { targetPath } },
+      );
     }
     if (info.isSensitive) {
       throw new PolicyDeniedError(`Access to sensitive file is blocked: ${targetPath}`, {
@@ -167,12 +180,15 @@ export class FileManager {
           truncated = true;
           return;
         }
+        if (dirent.isSymbolicLink()) {
+          continue;
+        }
 
         const fullPath = path.join(dirPath, dirent.name);
         if (!isPathWithinWorkspace(this.workspaceDir, fullPath) && !this.allowOutsideWorkspace) {
           continue;
         }
-        if (isSensitiveFilePath(fullPath)) {
+        if (isSensitiveFilePath(fullPath) || isHardlinkedFile(fullPath)) {
           continue;
         }
 
@@ -198,8 +214,7 @@ export class FileManager {
           input.recursive &&
           type === "directory" &&
           depth < input.maxDepth &&
-          !DEFAULT_SKIP_DIRS.has(dirent.name) &&
-          !dirent.isSymbolicLink()
+          !DEFAULT_SKIP_DIRS.has(dirent.name)
         ) {
           walk(fullPath, depth + 1);
         }
@@ -228,17 +243,33 @@ export class FileManager {
       return failResult(startedAt, `File not found: ${input.path}`);
     }
 
-    const stat = fs.statSync(targetFile);
-    if (!stat.isFile()) {
+    const lstat = fs.lstatSync(targetFile);
+    if (lstat.isSymbolicLink() || !lstat.isFile()) {
       return failResult(startedAt, `Target path is not a regular file: ${input.path}`);
+    }
+    if (lstat.nlink > 1) {
+      throw new PolicyDeniedError(
+        `Access to hardlinked file (nlink > 1) is blocked: ${input.path}`,
+        { details: { path: input.path, nlink: lstat.nlink } },
+      );
     }
 
     const effectiveMaxBytes = Math.min(input.maxBytes, context.maxOutputBytes);
-    const readSize = Math.min(stat.size, effectiveMaxBytes);
-    const buffer = Buffer.alloc(readSize);
-
     const fd = fs.openSync(targetFile, "r");
+    let buffer: Buffer;
+    let fileSize: number;
+    let readSize: number;
     try {
+      const fstat = fs.fstatSync(fd);
+      if (!fstat.isFile() || fstat.nlink > 1) {
+        throw new PolicyDeniedError(
+          `Opened file handle failed regular-file/hardlink check: ${input.path}`,
+          { details: { path: input.path, nlink: fstat.nlink } },
+        );
+      }
+      fileSize = fstat.size;
+      readSize = Math.min(fileSize, effectiveMaxBytes);
+      buffer = Buffer.alloc(readSize);
       if (readSize > 0) {
         fs.readSync(fd, buffer, 0, readSize, 0);
       }
@@ -251,7 +282,7 @@ export class FileManager {
     }
 
     let content = buffer.toString("utf8");
-    const truncated = stat.size > effectiveMaxBytes;
+    const truncated = fileSize > effectiveMaxBytes;
 
     if (input.startLine !== undefined || input.endLine !== undefined) {
       const lines = content.split(/\r?\n/);
@@ -268,7 +299,7 @@ export class FileManager {
       content,
       {
         path: input.path,
-        sizeBytes: stat.size,
+        sizeBytes: fileSize,
         bytesRead: readSize,
         truncated,
       },
@@ -385,7 +416,11 @@ export class FileManager {
         truncated = true;
         return;
       }
-      if (isSensitiveFilePath(filePath) || isInternalGitPath(filePath)) {
+      if (
+        isSensitiveFilePath(filePath) ||
+        isInternalGitPath(filePath) ||
+        isHardlinkedFile(filePath)
+      ) {
         return;
       }
 
@@ -515,6 +550,7 @@ export class FileManager {
     const targetPath = this.resolveSafePath(context.workingDirectory, input.path, {
       mutating: true,
       forbidWorkspaceRoot: true,
+      allowHardlinkDelete: true,
     });
 
     if (!fs.existsSync(targetPath)) {

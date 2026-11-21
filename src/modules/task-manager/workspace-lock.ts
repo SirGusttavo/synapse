@@ -33,10 +33,13 @@ function normalizeWorkspaceKey(workspaceDir: string): string {
 
 /**
  * Fair FIFO Reader-Writer lock scoped per canonical workspace directory.
- * - Multiple `read` tasks may run concurrently while no writer is active or queued.
- * - `write` (mutating) tasks run with strict exclusivity to prevent FS corruption
- *   and Git `.git/index.lock` races.
- * - Supports cancellation via AbortSignal while queued.
+ *
+ * Concurrency Scope & Guarantees:
+ * 1. Tasks within the same `TaskManager` / `SynapseRuntime` instance: COORDINATED.
+ * 2. Multiple `TaskManager` / `SynapseRuntime` instances within the SAME Node.js process:
+ *    COORDINATED by default via `DEFAULT_PROCESS_WORKSPACE_LOCK`.
+ * 3. Separate Node.js OS processes or external tools (IDEs, external terminals):
+ *    NOT COORDINATED (this lock is strictly in-memory inside the Node.js process).
  */
 export class WorkspaceLock {
   private readonly states = new Map<string, WorkspaceLockState>();
@@ -196,3 +199,5 @@ export class WorkspaceLock {
     };
   }
 }
+
+export const DEFAULT_PROCESS_WORKSPACE_LOCK = new WorkspaceLock();

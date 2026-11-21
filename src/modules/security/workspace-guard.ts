@@ -65,6 +65,71 @@ export function resolveCanonicalPath(targetPath: string): string {
   return path.join(realAncestor, ...pendingSegments);
 }
 
+/**
+ * Walks every existing path component from `workspaceDir` down to `targetPath`
+ * using `fs.lstatSync` and detects any symbolic link or NTFS junction (`isSymbolicLink()`).
+ */
+export function hasReparsePointInPathChain(workspaceDir: string, targetPath: string): boolean {
+  const resolvedWs = path.resolve(workspaceDir);
+  const resolvedTarget = path.resolve(workspaceDir, targetPath);
+
+  const rel = path.relative(resolvedWs, resolvedTarget);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    try {
+      return fs.existsSync(resolvedTarget) && fs.lstatSync(resolvedTarget).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  }
+
+  let current = resolvedWs;
+  try {
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  if (rel.length === 0) {
+    return false;
+  }
+
+  const parts = rel.split(path.sep).filter((p) => p.length > 0);
+  for (const part of parts) {
+    current = path.join(current, part);
+    if (!fs.existsSync(current)) {
+      break;
+    }
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detects whether an existing regular file has multiple hardlinks (`nlink > 1`),
+ * which on NTFS can be used to alias `.env` or outside-workspace sensitive files.
+ */
+export function isHardlinkedFile(targetPath: string): boolean {
+  try {
+    const resolved = path.resolve(targetPath);
+    if (!fs.existsSync(resolved)) {
+      return false;
+    }
+    const stat = fs.lstatSync(resolved);
+    return stat.isFile() && stat.nlink > 1;
+  } catch {
+    return false;
+  }
+}
+
 function matchesSensitiveRules(filePath: string): boolean {
   const normalized = path.resolve(filePath);
   const base = path.basename(normalized);
@@ -193,6 +258,8 @@ export interface ResolvedWorkspacePath {
   isInternalGit: boolean;
   isSensitiveConfig: boolean;
   isWorkspaceRoot: boolean;
+  hasReparsePoint: boolean;
+  isHardlinked: boolean;
 }
 
 export function inspectWorkspacePath(
@@ -223,5 +290,7 @@ export function inspectWorkspacePath(
     isInternalGit: isInternalGitPath(resolved),
     isSensitiveConfig: isSensitiveConfigPath(workspaceDir, resolved),
     isWorkspaceRoot: isWorkspaceRootPath(workspaceDir, resolved),
+    hasReparsePoint: hasReparsePointInPathChain(workspaceDir, resolved),
+    isHardlinked: isHardlinkedFile(resolved),
   };
 }

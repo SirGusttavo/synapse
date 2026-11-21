@@ -13,7 +13,11 @@ import type { ExecutionEngine } from "../execution-engine/index.js";
 import type { IPolicyEngine } from "../security/index.js";
 import { redactText } from "../security/redactor.js";
 import { assertValidTaskTransition } from "./state-machine.js";
-import { type LockMode, WorkspaceLock } from "./workspace-lock.js";
+import {
+  DEFAULT_PROCESS_WORKSPACE_LOCK,
+  type LockMode,
+  type WorkspaceLock,
+} from "./workspace-lock.js";
 
 export interface TaskManagerOptions {
   taskRepository: ITaskRepository;
@@ -57,7 +61,7 @@ export class TaskManager {
     this.policyEngine = options.policyEngine;
     this.executionEngine = options.executionEngine;
     this.auditLogger = options.auditLogger;
-    this.workspaceLock = options.workspaceLock ?? new WorkspaceLock();
+    this.workspaceLock = options.workspaceLock ?? DEFAULT_PROCESS_WORKSPACE_LOCK;
     this.eventBus = options.eventBus;
   }
 

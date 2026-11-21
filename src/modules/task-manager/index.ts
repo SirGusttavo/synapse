@@ -8,4 +8,8 @@ export {
   isValidTaskTransition,
   VALID_TASK_TRANSITIONS,
 } from "./state-machine.js";
-export { type LockMode, WorkspaceLock } from "./workspace-lock.js";
+export {
+  DEFAULT_PROCESS_WORKSPACE_LOCK,
+  type LockMode,
+  WorkspaceLock,
+} from "./workspace-lock.js";

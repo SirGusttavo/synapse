@@ -40,3 +40,11 @@ Ser explícito sobre limitações evita falsa sensação de segurança e orienta
    - Monitoramento em tempo real via Web/Desktop UI fica para a Fase 5, consumindo o mesmo barramento de eventos e serviços do núcleo.
 6. **Ausência de `gh` CLI no ambiente local:**
    - Automação avançada de Pull Requests/Issues no GitHub não faz parte do núcleo Git do MVP; será integrada via `@octokit/rest` em etapa posterior quando priorizada.
+7. **Escopo real do `WorkspaceLock` (Concorrência em Memória no Processo Node.js):**
+   - O `WorkspaceLock` (`DEFAULT_PROCESS_WORKSPACE_LOCK`) coordena com justiça FIFO (leitores paralelos, escritores exclusivos):
+     - Tarefas concorrentes dentro da **mesma instância** de `TaskManager` / `SynapseRuntime`;
+     - **Múltiplas instâncias** de `SynapseRuntime` / `TaskManager` dentro do **mesmo processo Node.js**.
+   - **Limitação explícita:** por ser uma primitiva em memória, o `WorkspaceLock` **não coordena processos Node.js independentes** (ex.: dois terminais separados executando a CLI simultaneamente sobre o mesmo diretório) nem ferramentas externas do sistema operacional (IDEs, clientes Git externos).
+8. **Garantias e Limitações de Sistema de Arquivos no Windows (Symlinks, Junctions, Hardlinks e TOCTOU):**
+   - **Garantias implementadas em userland:** resolução canônica (`fs.realpathSync`), varredura de cada segmento do caminho com `fs.lstatSync` bloqueando symlinks e NTFS junctions (`hasReparsePointInPathChain`), bloqueio de leitura/edição/busca em arquivos com múltiplos hardlinks NTFS (`nlink > 1` via `isHardlinkedFile` e `fs.fstatSync(fd)` no descritor aberto) para impedir *aliasing* de `.env` ou chaves privadas, e revalidação imediatamente antes de operações mutáveis (`PolicyEngine.revalidateAuthorized`).
+   - **Limitação de kernel/runtime no Windows:** o módulo `node:fs` do Node.js não expõe abertura por descritor de diretório (`openat2` com `RESOLVE_NO_SYMLINKS` / Win32 `NtCreateFile` com `FILE_OPEN_NO_REPARSE_POINT` em cada componente intermediário). Portanto, se um **processo externo concorrente** na mesma máquina substituir um diretório intermediário por uma junction na janela de microssegundos entre `lstatSync`/`realpathSync` e `openSync`/`renameSync`, o runtime Node.js não consegue impedir atomicamente a travessia sem isolamento de processo/container no nível do SO.

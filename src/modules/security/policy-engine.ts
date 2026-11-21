@@ -748,6 +748,26 @@ export class PolicyEngine implements IPolicyEngine {
           touchesOutsideWorkspace = true;
         }
 
+        if (info.hasReparsePoint) {
+          return {
+            level: "DENIED",
+            reasons: [
+              `Path traverses a symbolic link or NTFS junction inside the workspace: ${rawPath}`,
+            ],
+            detectedRisks: ["reparse_point_traversal"],
+          };
+        }
+
+        if (info.isHardlinked && request.toolName !== "file.delete") {
+          return {
+            level: "DENIED",
+            reasons: [
+              `Access to hardlinked file (nlink > 1) is blocked to prevent credential aliasing: ${rawPath}`,
+            ],
+            detectedRisks: ["hardlink_aliasing"],
+          };
+        }
+
         if (info.isSensitive) {
           return {
             level: "DENIED",

@@ -24,7 +24,9 @@ export {
 } from "./types.js";
 export {
   assertWorkingDirectoryAllowed,
+  hasReparsePointInPathChain,
   inspectWorkspacePath,
+  isHardlinkedFile,
   isInternalGitPath,
   isPathWithinWorkspace,
   isSensitiveConfigPath,
