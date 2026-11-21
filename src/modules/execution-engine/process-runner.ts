@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { ExecutionError } from "../../core/errors.js";
 import type { ExecutionStatus } from "../../core/types.js";
 import { sanitizeEnvironment } from "../security/env-sanitizer.js";
 
@@ -34,6 +35,32 @@ interface BoundedCollector {
   truncated: boolean;
 }
 
+const POST_KILL_SETTLE_GRACE_MS = 2_000;
+
+function validateRunOptions(options: ProcessRunOptions): void {
+  if (typeof options.executable !== "string" || options.executable.trim().length === 0) {
+    throw new ExecutionError("Process executable must be a non-empty string");
+  }
+  if (options.executable.includes("\0")) {
+    throw new ExecutionError("Process executable contains invalid null byte");
+  }
+  for (const arg of options.args) {
+    if (typeof arg !== "string" || arg.includes("\0")) {
+      throw new ExecutionError("Process argument contains invalid value or null byte");
+    }
+  }
+  if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+    throw new ExecutionError("Process timeoutMs must be a positive finite number", {
+      details: { timeoutMs: options.timeoutMs },
+    });
+  }
+  if (!Number.isInteger(options.maxOutputBytes) || options.maxOutputBytes < 0) {
+    throw new ExecutionError("Process maxOutputBytes must be a non-negative integer", {
+      details: { maxOutputBytes: options.maxOutputBytes },
+    });
+  }
+}
+
 function appendBounded(collector: BoundedCollector, chunk: Buffer, limit: number): void {
   if (collector.truncated) {
     return;
@@ -53,6 +80,14 @@ function appendBounded(collector: BoundedCollector, chunk: Buffer, limit: number
   }
 }
 
+function fallbackForceKill(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Process already exited
+  }
+}
+
 export function killProcessTree(pid: number | undefined): void {
   if (!pid || pid <= 0) {
     return;
@@ -66,35 +101,29 @@ export function killProcessTree(pid: number | undefined): void {
         stdio: "ignore",
       });
       killer.on("error", () => {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // Process already exited
+        fallbackForceKill(pid);
+      });
+      killer.on("close", (code) => {
+        if (code !== 0) {
+          fallbackForceKill(pid);
         }
       });
     } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Process already exited
-      }
+      fallbackForceKill(pid);
     }
     return;
   }
 
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // Process already exited
-  }
+  fallbackForceKill(pid);
 }
 
 /**
- * Executes OS binaries strictly with `shell: false`, sanitized environments,
+ * Executes OS binaries strictly with `shell: false`, validated arguments, sanitized environments,
  * bounded stdout/stderr streaming, timeout enforcement and full process tree cleanup.
  */
 export class NodeProcessRunner implements IProcessRunner {
   public async run(options: ProcessRunOptions): Promise<ProcessRunResult> {
+    validateRunOptions(options);
     const startedAt = Date.now();
 
     if (options.signal?.aborted) {
@@ -120,6 +149,8 @@ export class NodeProcessRunner implements IProcessRunner {
       let timedOut = false;
       let cancelled = false;
       let spawnErrorMessage: string | undefined;
+      let terminationSignal: NodeJS.Signals | null = null;
+      let forceSettleTimer: ReturnType<typeof setTimeout> | undefined;
 
       const stdoutCollector: BoundedCollector = { chunks: [], bytes: 0, truncated: false };
       const stderrCollector: BoundedCollector = { chunks: [], bytes: 0, truncated: false };
@@ -138,6 +169,9 @@ export class NodeProcessRunner implements IProcessRunner {
         }
         settled = true;
         clearTimeout(timer);
+        if (forceSettleTimer) {
+          clearTimeout(forceSettleTimer);
+        }
         if (options.signal) {
           options.signal.removeEventListener("abort", onAbort);
         }
@@ -157,6 +191,9 @@ export class NodeProcessRunner implements IProcessRunner {
           errorMessage = errorMessage ?? `Process exceeded timeout of ${options.timeoutMs}ms`;
         } else if (spawnErrorMessage || exitCode !== 0) {
           status = "failed";
+          if (!errorMessage && terminationSignal) {
+            errorMessage = `Process terminated by signal ${terminationSignal}`;
+          }
         } else {
           status = "completed";
         }
@@ -173,12 +210,23 @@ export class NodeProcessRunner implements IProcessRunner {
         });
       };
 
+      const terminateAndEnsureSettle = () => {
+        killProcessTree(child.pid);
+        if (!forceSettleTimer) {
+          forceSettleTimer = setTimeout(() => {
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+            finish(null);
+          }, POST_KILL_SETTLE_GRACE_MS);
+        }
+      };
+
       const onAbort = () => {
         if (settled) {
           return;
         }
         cancelled = true;
-        killProcessTree(child.pid);
+        terminateAndEnsureSettle();
       };
 
       if (options.signal) {
@@ -190,7 +238,7 @@ export class NodeProcessRunner implements IProcessRunner {
           return;
         }
         timedOut = true;
-        killProcessTree(child.pid);
+        terminateAndEnsureSettle();
       }, options.timeoutMs);
 
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -206,7 +254,8 @@ export class NodeProcessRunner implements IProcessRunner {
         finish(null);
       });
 
-      child.on("close", (code) => {
+      child.on("close", (code, sig) => {
+        terminationSignal = sig;
         finish(code);
       });
     });

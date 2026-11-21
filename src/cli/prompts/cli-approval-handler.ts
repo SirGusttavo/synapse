@@ -26,7 +26,18 @@ export class CliApprovalHandler implements IApprovalHandler {
     this.timeoutMs = options.timeoutMs ?? null;
   }
 
-  public async requestApproval(request: ApprovalRequest): Promise<ApprovalResponse> {
+  public async requestApproval(
+    request: ApprovalRequest,
+    externalSignal?: AbortSignal,
+  ): Promise<ApprovalResponse> {
+    if (externalSignal?.aborted) {
+      return {
+        approved: false,
+        approvedBy: null,
+        reason: "Operation cancelled before approval prompt",
+      };
+    }
+
     if (!this.input.isTTY) {
       return {
         approved: false,
@@ -57,10 +68,17 @@ export class CliApprovalHandler implements IApprovalHandler {
     });
 
     const controller = new AbortController();
+    let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (this.timeoutMs !== null) {
-      timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.timeoutMs);
     }
+
+    const onExternalAbort = () => controller.abort();
+    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
 
     try {
       const answer = await rl.question("Aprovar operacao? [s/N]: ", {
@@ -79,8 +97,8 @@ export class CliApprovalHandler implements IApprovalHandler {
       return {
         approved: false,
         approvedBy: null,
-        timedOut: controller.signal.aborted,
-        reason: controller.signal.aborted
+        timedOut,
+        reason: timedOut
           ? "Tempo limite de aprovacao excedido (fail-closed)"
           : "Prompt de aprovacao interrompido (fail-closed)",
       };
@@ -88,6 +106,7 @@ export class CliApprovalHandler implements IApprovalHandler {
       if (timer) {
         clearTimeout(timer);
       }
+      externalSignal?.removeEventListener("abort", onExternalAbort);
       rl.close();
     }
   }

@@ -29,7 +29,7 @@ import { SynapseEventBus } from "./events.js";
 import type { AuditEventRecord, TaskRecord } from "./types.js";
 
 export interface CreateRuntimeOptions extends LoadConfigOptions {
-  approvalHandler?: IApprovalHandler;
+  approvalHandler?: IApprovalHandler | ((config: SynapseConfig) => IApprovalHandler);
   processRunner?: IProcessRunner;
   logDestination?: DestinationStream;
   inMemoryDb?: boolean;
@@ -102,10 +102,15 @@ export class SynapseRuntime {
       eventBus,
     });
 
+    const resolvedApprovalHandler =
+      typeof options.approvalHandler === "function"
+        ? options.approvalHandler(config)
+        : (options.approvalHandler ?? new NonInteractiveApprovalHandler());
+
     const policyEngine = new PolicyEngine({
       workspaceDir: config.workspaceDir,
       securityConfig: config.security,
-      approvalHandler: options.approvalHandler ?? new NonInteractiveApprovalHandler(),
+      approvalHandler: resolvedApprovalHandler,
     });
 
     const processRunner = options.processRunner ?? new NodeProcessRunner();

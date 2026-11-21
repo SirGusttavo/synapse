@@ -127,8 +127,11 @@ export class TaskManager {
     this.taskRepository.create(task);
     this.eventBus?.emit("task:created", task);
 
+    let auditAttempted = false;
+
     try {
       const evaluation = await this.policyEngine.evaluateAndAuthorize(taskId, request, {
+        signal: controller.signal,
         onAwaitingApproval: (approvalReq) => {
           updateTask({
             status: "AWAITING_APPROVAL",
@@ -139,15 +142,17 @@ export class TaskManager {
 
       if (!evaluation.allowed) {
         const finalStatus: TaskStatus = controller.signal.aborted ? "CANCELLED" : "DENIED";
-        const errorSummary = evaluation.reasons.join("; ");
+        const sanitizedReasons = evaluation.reasons.map((r) => redactText(r));
+        const errorSummary = sanitizedReasons.join("; ");
 
         updateTask({
           status: finalStatus,
           policyLevel: evaluation.policyLevel,
           approvalStatus: evaluation.approvalStatus,
-          errorSummary: redactText(errorSummary),
+          errorSummary,
         });
 
+        auditAttempted = true;
         this.auditLogger.record({
           sessionId: request.sessionId,
           taskId,
@@ -167,7 +172,7 @@ export class TaskManager {
         return {
           task,
           result: null,
-          deniedReasons: evaluation.reasons,
+          deniedReasons: sanitizedReasons,
         };
       }
 
@@ -199,6 +204,7 @@ export class TaskManager {
         errorSummary: errorSummary ? redactText(errorSummary.slice(0, 500)) : null,
       });
 
+      auditAttempted = true;
       this.auditLogger.record({
         sessionId: request.sessionId,
         taskId,
@@ -233,20 +239,23 @@ export class TaskManager {
         });
       }
 
-      this.auditLogger.record({
-        sessionId: request.sessionId,
-        taskId,
-        actor: request.actor,
-        operation: request.toolName,
-        category: request.category,
-        input: request.input,
-        workingDirectory: task.workingDirectory,
-        policyLevel: task.policyLevel ?? "CONDITIONAL",
-        policyDecision: task.policyLevel ?? "CONDITIONAL",
-        approvalStatus: task.approvalStatus,
-        status: "FAILED",
-        errorSummary: sanitizedError,
-      });
+      if (!auditAttempted) {
+        auditAttempted = true;
+        this.auditLogger.record({
+          sessionId: request.sessionId,
+          taskId,
+          actor: request.actor,
+          operation: request.toolName,
+          category: request.category,
+          input: request.input,
+          workingDirectory: task.workingDirectory,
+          policyLevel: task.policyLevel ?? "CONDITIONAL",
+          policyDecision: task.policyLevel ?? "CONDITIONAL",
+          approvalStatus: task.approvalStatus,
+          status: "FAILED",
+          errorSummary: sanitizedError,
+        });
+      }
 
       throw error;
     } finally {

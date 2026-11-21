@@ -1,3 +1,4 @@
+import os from "node:os";
 import type { PreferredShell } from "../../../config/schema.js";
 import { ShellError } from "../../../core/errors.js";
 import type { IProcessRunner } from "../../execution-engine/process-runner.js";
@@ -10,18 +11,25 @@ export interface PowerShellAdapterOptions {
 }
 
 function buildWrappedPowerShellScript(command: string): string {
-  // Forces UTF-8 I/O, propagates native $LASTEXITCODE and PowerShell $? non-terminating errors reliably
+  // Pass command text as a pure Base64 data literal so user input can never syntactically
+  // break out of the outer try/catch error-handling and UTF-8 bootstrap wrapper.
+  const base64Command = Buffer.from(command, "utf8").toString("base64");
+
   return [
     "[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "if (Get-Variable -Name PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'PlainText' }",
     "$global:LASTEXITCODE = 0",
+    "$Error.Clear()",
+    `$__synapse_raw = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${base64Command}'))`,
     "try {",
-    command,
+    "  $__synapse_sb = [scriptblock]::Create($__synapse_raw)",
+    "  . $__synapse_sb",
     "} catch {",
     "  [Console]::Error.WriteLine($_.Exception.Message)",
     "  exit 1",
     "}",
     "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-    "if (-not $?) { exit 1 }",
+    "if (-not $? -or $Error.Count -gt 0) { exit 1 }",
   ].join("\n");
 }
 
@@ -59,7 +67,7 @@ export class PowerShellAdapter implements IShellAdapter {
       const probe = await this.processRunner.run({
         executable: candidate,
         args: ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"],
-        cwd: process.cwd(),
+        cwd: os.tmpdir(),
         timeoutMs: 5_000,
         maxOutputBytes: 4_096,
       });

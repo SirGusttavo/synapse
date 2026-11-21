@@ -85,7 +85,9 @@ export function createCliProgram(io: CliIo = DEFAULT_IO): {
           overrides: opts.logLevel
             ? { logging: { level: opts.logLevel, pretty: false } }
             : undefined,
-          approvalHandler: io.approvalHandler ?? new CliApprovalHandler(),
+          approvalHandler:
+            io.approvalHandler ??
+            ((cfg) => new CliApprovalHandler({ timeoutMs: cfg.security.approvalTimeoutMs })),
         });
 
         try {
