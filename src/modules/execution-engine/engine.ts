@@ -20,6 +20,7 @@ export class ExecutionEngine {
   private readonly registry: ToolRegistry;
   private readonly defaultTimeoutMs: number;
   private readonly defaultMaxOutputBytes: number;
+  private readonly consumedAuthorizations = new WeakSet<AuthorizedOperation>();
 
   constructor(options: ExecutionEngineOptions) {
     this.registry = options.registry;
@@ -36,6 +37,13 @@ export class ExecutionEngine {
         "ExecutionEngine rejected an unauthorized operation (missing PolicyEngine authorization)",
       );
     }
+
+    if (this.consumedAuthorizations.has(authorized)) {
+      throw new PolicyDeniedError(
+        "ExecutionEngine rejected replay of an already-consumed authorization token",
+      );
+    }
+    this.consumedAuthorizations.add(authorized);
 
     const tool = this.registry.get(authorized.request.toolName);
     if (!tool) {

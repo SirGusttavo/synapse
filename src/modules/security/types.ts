@@ -22,13 +22,13 @@ export interface ApprovalResponse {
 }
 
 export interface IApprovalHandler {
-  requestApproval(request: ApprovalRequest): Promise<ApprovalResponse>;
+  requestApproval(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalResponse>;
 }
 
 export interface AuthorizedOperation {
   readonly [AUTHORIZED_OPERATION_BRAND]: true;
   readonly taskId: string;
-  readonly request: OperationRequest;
+  readonly request: Readonly<OperationRequest>;
   readonly canonicalWorkingDirectory: string;
   readonly policyLevel: PermissionLevel;
   readonly policyDecision: PermissionLevel;
@@ -58,6 +58,7 @@ export interface IPolicyEngine {
     request: OperationRequest,
     hooks?: {
       onAwaitingApproval?: (req: ApprovalRequest) => void;
+      signal?: AbortSignal;
     },
   ): Promise<PolicyEvaluationResult>;
 }

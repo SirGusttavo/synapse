@@ -62,7 +62,7 @@ export class AuditService implements IAuditLogger {
       operation: entry.operation,
       category: entry.category,
       sanitizedInput: JSON.stringify(sanitizedInputObj),
-      workingDirectory: entry.workingDirectory,
+      workingDirectory: redactText(entry.workingDirectory),
       policyLevel: entry.policyLevel,
       policyDecision: entry.policyDecision,
       approvalStatus: entry.approvalStatus,

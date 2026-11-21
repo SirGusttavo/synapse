@@ -16,6 +16,22 @@ const SENSITIVE_BASENAME_PATTERNS: readonly RegExp[] = [
 
 const SENSITIVE_PATH_SEGMENTS = new Set([".ssh", ".gnupg", ".aws", ".azure"]);
 
+const UNC_OR_DEVICE_PREFIX = /^[/\\]{2}/;
+
+function containsNullByte(value: string): boolean {
+  return value.includes("\0");
+}
+
+function isUncOrDevicePath(rawPath: string, resolvedPath?: string): boolean {
+  if (UNC_OR_DEVICE_PREFIX.test(rawPath)) {
+    return true;
+  }
+  if (resolvedPath && UNC_OR_DEVICE_PREFIX.test(resolvedPath)) {
+    return true;
+  }
+  return false;
+}
+
 function normalizeForComparison(filePath: string): string {
   const resolved = path.resolve(filePath);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -28,7 +44,7 @@ function resolveCanonicalPath(targetPath: string): string {
     return fs.realpathSync(resolved);
   }
 
-  // Walk up until an existing ancestor is found to defeat symlink escape on not-yet-created files
+  // Walk up until an existing ancestor is found to defeat symlink/junction escape on not-yet-created files
   const pendingSegments: string[] = [];
   let current = resolved;
 
@@ -45,8 +61,8 @@ function resolveCanonicalPath(targetPath: string): string {
   return path.join(realAncestor, ...pendingSegments);
 }
 
-export function isSensitiveFilePath(targetPath: string): boolean {
-  const normalized = path.resolve(targetPath);
+function matchesSensitiveRules(filePath: string): boolean {
+  const normalized = path.resolve(filePath);
   const base = path.basename(normalized);
 
   for (const pattern of SENSITIVE_BASENAME_PATTERNS) {
@@ -59,15 +75,32 @@ export function isSensitiveFilePath(targetPath: string): boolean {
   return segments.some((segment) => SENSITIVE_PATH_SEGMENTS.has(segment));
 }
 
+export function isSensitiveFilePath(targetPath: string): boolean {
+  if (containsNullByte(targetPath)) {
+    return true;
+  }
+  if (matchesSensitiveRules(targetPath)) {
+    return true;
+  }
+  try {
+    const canonical = resolveCanonicalPath(targetPath);
+    return matchesSensitiveRules(canonical);
+  } catch {
+    return false;
+  }
+}
+
 export function isPathWithinWorkspace(workspaceDir: string, targetPath: string): boolean {
-  if (targetPath.startsWith("\\\\")) {
+  if (containsNullByte(workspaceDir) || containsNullByte(targetPath)) {
+    return false;
+  }
+  const resolved = path.resolve(workspaceDir, targetPath);
+  if (isUncOrDevicePath(targetPath, resolved)) {
     return false;
   }
 
   const canonicalWorkspace = normalizeForComparison(resolveCanonicalPath(workspaceDir));
-  const canonicalTarget = normalizeForComparison(
-    resolveCanonicalPath(path.resolve(workspaceDir, targetPath)),
-  );
+  const canonicalTarget = normalizeForComparison(resolveCanonicalPath(resolved));
 
   if (canonicalTarget === canonicalWorkspace) {
     return true;
@@ -80,25 +113,39 @@ export function isPathWithinWorkspace(workspaceDir: string, targetPath: string):
   return canonicalTarget.startsWith(prefix);
 }
 
+export interface WorkingDirectoryValidation {
+  canonicalPath: string;
+  insideWorkspace: boolean;
+}
+
 export function assertWorkingDirectoryAllowed(
   workspaceDir: string,
   candidateDir: string,
   allowOutsideWorkspace: boolean,
-): string {
-  if (candidateDir.startsWith("\\\\")) {
-    throw new PolicyDeniedError("UNC network paths are blocked by workspace policy", {
+): WorkingDirectoryValidation {
+  if (containsNullByte(candidateDir)) {
+    throw new PolicyDeniedError("Working directory path contains invalid null byte", {
       details: { candidateDir },
     });
   }
 
   const resolved = path.resolve(workspaceDir, candidateDir);
-  const inside = isPathWithinWorkspace(workspaceDir, resolved);
+  if (isUncOrDevicePath(candidateDir, resolved)) {
+    throw new PolicyDeniedError("UNC and device paths are blocked by workspace policy", {
+      details: { candidateDir, resolved },
+    });
+  }
 
-  if (!inside && !allowOutsideWorkspace) {
+  const insideWorkspace = isPathWithinWorkspace(workspaceDir, resolved);
+
+  if (!insideWorkspace && !allowOutsideWorkspace) {
     throw new PolicyDeniedError(`Working directory escapes authorized workspace: ${resolved}`, {
       details: { workspaceDir: path.resolve(workspaceDir), candidateDir: resolved },
     });
   }
 
-  return resolveCanonicalPath(resolved);
+  return {
+    canonicalPath: resolveCanonicalPath(resolved),
+    insideWorkspace,
+  };
 }

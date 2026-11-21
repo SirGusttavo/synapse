@@ -42,7 +42,8 @@ export const DEFAULT_ALLOWED_SHELL_COMMANDS: readonly string[] = [
   "git log",
   "git diff",
   "git branch",
-  "git tag",
+  "git tag --list",
+  "git tag -l",
 ];
 
 export const LoggingConfigSchema = z

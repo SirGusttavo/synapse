@@ -4,15 +4,15 @@ const SENSITIVE_KEY_PATTERN =
   /(password|passwd|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key|access[_-]?key|refresh[_-]?token)/i;
 
 const SECRET_TEXT_PATTERNS: readonly RegExp[] = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}\b/gi,
-  /\bsk-ant-[A-Za-z0-9_-]{10,}\b/g,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
-  /\bghp_[A-Za-z0-9]{20,}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
-  /\bAIza[0-9A-Za-z_-]{20,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi,
+  /\bsk-ant-[A-Za-z0-9_-]{10,}/g,
+  /\bsk-[A-Za-z0-9_-]{16,}/g,
+  /\bghp_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bAIza[0-9A-Za-z_-]{20,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:\s/@]+:)([^@\s/]+)(@)/g,
-  /\b((?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["']?)([^\s"';,&]+)(["']?)/gi,
+  /((?:[A-Za-z0-9_]*[_-])?(?:password|passwd|secret|token|api[_-]?key|credential|private[_-]?key|access[_-]?key)\s*[:=]\s*["']?)([^\s"';,&]+)(["']?)/gi,
 ];
 
 export function redactText(text: string): string {

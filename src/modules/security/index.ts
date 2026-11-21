@@ -23,4 +23,5 @@ export {
   assertWorkingDirectoryAllowed,
   isPathWithinWorkspace,
   isSensitiveFilePath,
+  type WorkingDirectoryValidation,
 } from "./workspace-guard.js";

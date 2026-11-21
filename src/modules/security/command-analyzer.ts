@@ -12,31 +12,34 @@ const DENIED_RULES: ReadonlyArray<{ risk: string; reason: string; pattern: RegEx
   {
     risk: "privilege_escalation",
     reason: "Privileged execution is blocked by default",
-    pattern: /\b(sudo|gsudo|runas)\b|Start-Process\b[^;\n]*-Verb\s+['"]?RunAs['"]?/i,
+    pattern: /\b(sudo|gsudo|runas)\b|Start-Process\b[^\r\n;]*-v(?:erb)?\s+['"]?RunAs['"]?/i,
   },
   {
     risk: "powershell_obfuscation",
-    reason: "Encoded or dynamically evaluated PowerShell commands are blocked by default",
-    pattern: /(?:^|\s)-(?:enc|encodedcommand|ec)\b|\b(?:Invoke-Expression|iex)\b/i,
+    reason:
+      "Encoded, dynamically compiled or dynamically evaluated PowerShell commands are blocked by default",
+    pattern:
+      /(?:^|\s)-(?:e|en|enc|enco|encod|encode|encoded|encodedc|encodedcommand|ec)\b|\b(?:Invoke-Expression|iex|Invoke-Command|icm|Add-Type)\b|\[(?:System\.Management\.Automation\.)?scriptblock\]::Create\b/i,
   },
   {
     risk: "git_destructive_history",
-    reason: "Destructive Git operations (--force, --hard, clean -fd) are blocked by default",
+    reason:
+      "Destructive Git operations (--force, --hard, +refspec, clean -fd, dangerous -c hooks) are blocked by default",
     pattern:
-      /\bgit\s+(?:push\b[^\n]*(?:--force(?!-with-lease)|-f\b)|reset\b[^\n]*--hard\b|clean\b[^\n]*-[a-z]*f[a-z]*d|clean\b[^\n]*-[a-z]*d[a-z]*f)/i,
+      /\bgit\b[^\r\n]*(?:\bpush\b[^\r\n]*(?:--force(?!-with-lease)|-f\b|\s\+[^\s]+)|\breset\b[^\r\n]*--hard\b|\bclean\b[^\r\n]*(?:-[a-z]*f[a-z]*d|-[a-z]*d[a-z]*f)|\s-c\s+['"]?(?:core\.hooksPath|core\.sshCommand|core\.pager|core\.fsmonitor)=)/i,
   },
   {
     risk: "indiscriminate_deletion",
     reason: "Indiscriminate recursive deletion or disk-wiping command is blocked by default",
     pattern:
-      /\b(?:Format-Volume|Clear-Disk|Remove-Partition)\b|\b(?:rm|Remove-Item|ri|del|erase|rd|rmdir)\b[^\n]*(?:(?:-(?:rf|fr)\b)|(?:-Recurse\b[^\n]*-Force\b)|(?:-Force\b[^\n]*-Recurse\b)|(?:\/s\b[^\n]*\/q\b)|(?:\/q\b[^\n]*\/s\b))[^\n]*(?:[*]|\\$|\/$|[A-Za-z]:\\(?:\s|$)|\.\.)/i,
+      /\b(?:Format-Volume|Clear-Disk|Remove-Partition)\b|\b(?:rm|Remove-Item|ri|del|erase|rd|rmdir)\b[^\r\n]*(?:(?:-(?:rf|fr)\b)|(?:-Recurse\b[^\r\n]*-Force\b)|(?:-Force\b[^\r\n]*-Recurse\b)|(?:\/s\b[^\r\n]*\/q\b)|(?:\/q\b[^\r\n]*\/s\b))[^\r\n]*(?:[*]|\\$|\/$|[A-Za-z]:\\(?:\s|$)|\.\.)/i,
   },
   {
     risk: "credential_access",
     reason:
       "Direct access to credentials, secrets or sensitive environment variables is blocked by default",
     pattern:
-      /(?:Get-ChildItem|gci|ls|dir)\s+env:|(?:\$env:(?:[A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*))|\bcmdkey\s+\/list\b|(?:^|[\s"'\\/])(?:\.env(?!\.example|\.sample)|id_rsa|id_ed25519)(?:$|[\s"'])/i,
+      /(?:Get-ChildItem|Get-Item|Get-Content|gci|gi|gc|cat|type|ls|dir)\s+env:|\[(?:System\.)?Environment\]::GetEnvironmentVariable(?:s)?\b|(?:\$env:(?:[A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Za-z0-9_]*))|\bcmdkey\s+\/list\b|(?:^|[\s"'\\/])(?:\.env(?!\.example|\.sample|\.template)|id_rsa|id_ed25519)(?:$|[\s"'])/i,
   },
 ];
 
@@ -44,7 +47,13 @@ const HUMAN_APPROVAL_RULES: ReadonlyArray<{ risk: string; reason: string; patter
   {
     risk: "git_push",
     reason: "Publishing commits with git push requires explicit human approval",
-    pattern: /\bgit\s+push\b/i,
+    pattern: /\bgit\b[^\r\n]*\bpush\b/i,
+  },
+  {
+    risk: "git_branch_or_tag_delete",
+    reason: "Deleting Git branches or tags requires explicit human approval",
+    pattern:
+      /\bgit\b[^\r\n]*(?:\bbranch\b[^\r\n]*(?:-[dD]\b|--delete\b)|\btag\b[^\r\n]*(?:-d\b|--delete\b))/i,
   },
   {
     risk: "file_or_directory_deletion",
@@ -61,9 +70,20 @@ const HUMAN_APPROVAL_RULES: ReadonlyArray<{ risk: string; reason: string; patter
 
 const CONDITIONAL_RULES: ReadonlyArray<{ risk: string; reason: string; pattern: RegExp }> = [
   {
+    risk: "multiline_command",
+    reason: "Multi-line commands cannot be auto-approved and require review",
+    pattern: /[\r\n]/,
+  },
+  {
     risk: "shell_chaining_or_redirection",
-    reason: "Command contains chaining, piping, subexpressions or redirection operators",
-    pattern: /(?:&&|\|\||[;|<>`]|\$\()/,
+    reason:
+      "Command contains chaining, piping, call/dot operators, subexpressions, blocks or redirection",
+    pattern: /(?:&&|\|\||[;|<>`&(){}]|\$\(|@\(|(?:^|\s)\.\s+)/,
+  },
+  {
+    risk: "workspace_path_escape_argument",
+    reason: "Command references parent traversal (..), absolute drive or UNC path in arguments",
+    pattern: /(?:^|[\s"'=])(?:\.\.(?:[\\/]|$)|[A-Za-z]:[\\/]|[/\\]{2})/,
   },
   {
     risk: "package_installation",
@@ -78,19 +98,20 @@ const CONDITIONAL_RULES: ReadonlyArray<{ risk: string; reason: string; pattern: 
   {
     risk: "git_mutation",
     reason: "Git write operation requires conditional validation",
-    pattern: /\bgit\s+(?:commit|merge|pull|clone|checkout|rebase|cherry-pick|tag)\b/i,
+    pattern:
+      /\bgit\b[^\r\n]*\b(?:commit|merge|pull|clone|checkout|switch|rebase|cherry-pick|stash|add|init|reset)\b/i,
   },
 ];
 
-function stripRedundantWhitespace(command: string): string {
-  return command.trim().replace(/\s+/g, " ");
+function normalizeSingleLine(command: string): string {
+  return command.trim().replace(/[ \t]+/g, " ");
 }
 
 function matchesAllowlist(normalizedCommand: string, allowedCommands: readonly string[]): boolean {
   const lower = normalizedCommand.toLowerCase();
 
   for (const rawAllowed of allowedCommands) {
-    const allowed = stripRedundantWhitespace(rawAllowed).toLowerCase();
+    const allowed = normalizeSingleLine(rawAllowed).toLowerCase();
     if (allowed.length === 0) {
       continue;
     }
@@ -106,23 +127,27 @@ export function analyzeShellCommand(
   command: string,
   allowedCommands: readonly string[],
 ): CommandAnalysisResult {
-  const normalizedCommand = stripRedundantWhitespace(command);
+  const rawTrimmed = command.trim();
+  const normalizedCommand = normalizeSingleLine(rawTrimmed);
   const reasons: string[] = [];
   const detectedRisks: string[] = [];
 
-  if (normalizedCommand.length === 0) {
+  if (normalizedCommand.length === 0 || command.includes("\0")) {
     return {
       level: "DENIED",
-      reasons: ["Empty command is not allowed"],
-      detectedRisks: ["empty_command"],
+      reasons: ["Empty or null-byte command is not allowed"],
+      detectedRisks: ["invalid_command"],
       normalizedCommand,
       matchedAllowlist: false,
     };
   }
 
-  // 1. Check hard-blocked rules first (cannot be bypassed by allowlist)
+  // Strip PowerShell backtick escapes only for detection matching so `I`e`x` cannot evade rules
+  const deobfuscated = rawTrimmed.replace(/`([A-Za-z])/g, "$1");
+
+  // 1. Check hard-blocked rules first (cannot be bypassed by allowlist or backticks)
   for (const rule of DENIED_RULES) {
-    if (rule.pattern.test(normalizedCommand)) {
+    if (rule.pattern.test(rawTrimmed) || rule.pattern.test(deobfuscated)) {
       detectedRisks.push(rule.risk);
       reasons.push(rule.reason);
     }
@@ -139,7 +164,7 @@ export function analyzeShellCommand(
 
   // 2. Check human-approval rules
   for (const rule of HUMAN_APPROVAL_RULES) {
-    if (rule.pattern.test(normalizedCommand)) {
+    if (rule.pattern.test(rawTrimmed) || rule.pattern.test(deobfuscated)) {
       detectedRisks.push(rule.risk);
       reasons.push(rule.reason);
     }
@@ -154,9 +179,9 @@ export function analyzeShellCommand(
     };
   }
 
-  // 3. Check conditional risks (chaining/redirection defeats simple prefix allowlist!)
+  // 3. Check conditional risks on RAW command (preserves \r/\n and catches (), {}, &, .., C:\)
   for (const rule of CONDITIONAL_RULES) {
-    if (rule.pattern.test(normalizedCommand)) {
+    if (rule.pattern.test(rawTrimmed)) {
       detectedRisks.push(rule.risk);
       reasons.push(rule.reason);
     }
@@ -171,7 +196,7 @@ export function analyzeShellCommand(
     };
   }
 
-  // 4. Only pure, unchained commands matching the configured allowlist are AUTO
+  // 4. Only pure, single-line, workspace-local commands matching allowlist are AUTO
   const allowlisted = matchesAllowlist(normalizedCommand, allowedCommands);
   if (allowlisted) {
     return {
@@ -183,7 +208,7 @@ export function analyzeShellCommand(
     };
   }
 
-  // 5. Default-deny / escalate unrecognized commands
+  // 5. Escalate unrecognized commands
   return {
     level: "CONDITIONAL",
     reasons: ["Command is not in the configured automatic allowlist"],
