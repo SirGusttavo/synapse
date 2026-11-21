@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { ApprovalStatus, OperationRequest, PermissionLevel } from "../../core/types.js";
 
 export const AUTHORIZED_OPERATION_BRAND = Symbol("synapse.authorized_operation");
@@ -35,6 +36,8 @@ export interface AuthorizedOperation {
   readonly approvalStatus: ApprovalStatus;
   readonly approvedBy: string | null;
   readonly reasons: readonly string[];
+  readonly mutating: boolean;
+  readonly inputDigest: string;
 }
 
 export type PolicyEvaluationResult =
@@ -52,6 +55,10 @@ export type PolicyEvaluationResult =
       detectedRisks: string[];
     };
 
+export type RevalidationResult =
+  | { valid: true }
+  | { valid: false; reasons: string[]; detectedRisks: string[] };
+
 export interface IPolicyEngine {
   evaluateAndAuthorize(
     taskId: string,
@@ -61,6 +68,37 @@ export interface IPolicyEngine {
       signal?: AbortSignal;
     },
   ): Promise<PolicyEvaluationResult>;
+  revalidateAuthorized(authorized: AuthorizedOperation): RevalidationResult;
+}
+
+function canonicalStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalStringify(item)).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalStringify(v)}`).join(",")}}`;
+}
+
+export function computeAuthorizationDigest(params: {
+  taskId: string;
+  toolName: string;
+  category: OperationRequest["category"];
+  canonicalWorkingDirectory: string;
+  input: Record<string, unknown>;
+}): string {
+  const payload = canonicalStringify({
+    taskId: params.taskId,
+    toolName: params.toolName,
+    category: params.category,
+    canonicalWorkingDirectory: params.canonicalWorkingDirectory,
+    input: params.input,
+  });
+  return crypto.createHash("sha256").update(payload, "utf8").digest("hex");
 }
 
 export function isAuthorizedOperation(value: unknown): value is AuthorizedOperation {

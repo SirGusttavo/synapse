@@ -1,7 +1,11 @@
 import { ExecutionError, PolicyDeniedError, ValidationError } from "../../core/errors.js";
 import type { ExecutionResult, ToolExecutionContext } from "../../core/types.js";
 import { redactText } from "../security/redactor.js";
-import { type AuthorizedOperation, isAuthorizedOperation } from "../security/types.js";
+import {
+  type AuthorizedOperation,
+  computeAuthorizationDigest,
+  isAuthorizedOperation,
+} from "../security/types.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export interface ExecutionEngineOptions {
@@ -35,6 +39,19 @@ export class ExecutionEngine {
     if (!isAuthorizedOperation(authorized)) {
       throw new PolicyDeniedError(
         "ExecutionEngine rejected an unauthorized operation (missing PolicyEngine authorization)",
+      );
+    }
+
+    const expectedDigest = computeAuthorizationDigest({
+      taskId: authorized.taskId,
+      toolName: authorized.request.toolName,
+      category: authorized.request.category,
+      canonicalWorkingDirectory: authorized.canonicalWorkingDirectory,
+      input: authorized.request.input,
+    });
+    if (expectedDigest !== authorized.inputDigest) {
+      throw new PolicyDeniedError(
+        "ExecutionEngine rejected authorization with mismatched parameter digest",
       );
     }
 

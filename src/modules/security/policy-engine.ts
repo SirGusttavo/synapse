@@ -8,9 +8,12 @@ import {
   type ApprovalResponse,
   AUTHORIZED_OPERATION_BRAND,
   type AuthorizedOperation,
+  computeAuthorizationDigest,
   type IApprovalHandler,
   type IPolicyEngine,
+  isAuthorizedOperation,
   type PolicyEvaluationResult,
+  type RevalidationResult,
 } from "./types.js";
 import { assertWorkingDirectoryAllowed } from "./workspace-guard.js";
 
@@ -29,6 +32,33 @@ function deepFreeze<T>(value: T): T {
 
 function snapshotRequest(request: OperationRequest): Readonly<OperationRequest> {
   return deepFreeze(structuredClone(request));
+}
+
+export function isMutatingOperation(request: Readonly<OperationRequest>): boolean {
+  if (request.category === "file") {
+    return (
+      request.toolName !== "file.list" &&
+      request.toolName !== "file.read" &&
+      request.toolName !== "file.search"
+    );
+  }
+
+  if (request.category === "git") {
+    if (
+      request.toolName === "git.status" ||
+      request.toolName === "git.diff" ||
+      request.toolName === "git.log"
+    ) {
+      return false;
+    }
+    if (request.toolName === "git.branch" || request.toolName === "git.tag") {
+      return request.input.action !== undefined && request.input.action !== "list";
+    }
+    return true;
+  }
+
+  // Shell and system operations default conservatively to exclusive write lock
+  return true;
 }
 
 /**
@@ -69,7 +99,6 @@ export class PolicyEngine implements IPolicyEngine {
     request: OperationRequest,
     hooks?: { onAwaitingApproval?: (req: ApprovalRequest) => void; signal?: AbortSignal },
   ): Promise<PolicyEvaluationResult> {
-    // Freeze an immutable snapshot immediately to eliminate TOCTOU mutation attacks
     const frozenRequest = snapshotRequest(request);
 
     let canonicalWorkingDirectory: string;
@@ -98,7 +127,11 @@ export class PolicyEngine implements IPolicyEngine {
       };
     }
 
-    const classification = this.classifyOperation(frozenRequest, insideWorkspace);
+    const classification = this.classifyOperation(
+      frozenRequest,
+      canonicalWorkingDirectory,
+      insideWorkspace,
+    );
 
     if (classification.level === "DENIED") {
       return {
@@ -112,6 +145,15 @@ export class PolicyEngine implements IPolicyEngine {
       };
     }
 
+    const mutating = isMutatingOperation(frozenRequest);
+    const inputDigest = computeAuthorizationDigest({
+      taskId,
+      toolName: frozenRequest.toolName,
+      category: frozenRequest.category,
+      canonicalWorkingDirectory,
+      input: frozenRequest.input,
+    });
+
     if (classification.level === "AUTO") {
       const authorized: AuthorizedOperation = deepFreeze({
         [AUTHORIZED_OPERATION_BRAND]: true,
@@ -123,6 +165,8 @@ export class PolicyEngine implements IPolicyEngine {
         approvalStatus: "not_required",
         approvedBy: null,
         reasons: [...classification.reasons],
+        mutating,
+        inputDigest,
       });
       return { allowed: true, authorized };
     }
@@ -139,7 +183,6 @@ export class PolicyEngine implements IPolicyEngine {
       };
     }
 
-    // CONDITIONAL (in baseline) and HUMAN_APPROVAL require explicit approval
     const approvalRequest: ApprovalRequest = {
       taskId,
       actor: frozenRequest.actor,
@@ -188,13 +231,106 @@ export class PolicyEngine implements IPolicyEngine {
       approvalStatus: "approved",
       approvedBy: response.approvedBy ?? "human-operator",
       reasons: [...classification.reasons],
+      mutating,
+      inputDigest,
     });
 
     return { allowed: true, authorized };
   }
 
-  private classifyOperation(
+  /**
+   * Re-validates an already-minted authorization immediately prior to executing
+   * a mutating operation (after acquiring WorkspaceLock) to defeat TOCTOU / symlink swaps.
+   */
+  public revalidateAuthorized(authorized: AuthorizedOperation): RevalidationResult {
+    if (!isAuthorizedOperation(authorized)) {
+      return {
+        valid: false,
+        reasons: ["Authorization object is missing valid PolicyEngine brand"],
+        detectedRisks: ["forged_authorization"],
+      };
+    }
+
+    const expectedDigest = computeAuthorizationDigest({
+      taskId: authorized.taskId,
+      toolName: authorized.request.toolName,
+      category: authorized.request.category,
+      canonicalWorkingDirectory: authorized.canonicalWorkingDirectory,
+      input: authorized.request.input,
+    });
+    if (expectedDigest !== authorized.inputDigest) {
+      return {
+        valid: false,
+        reasons: ["Authorization parameter digest mismatch (possible tampering)"],
+        detectedRisks: ["authorization_tampering"],
+      };
+    }
+
+    let canonicalNow: string;
+    let insideWorkspace: boolean;
+    try {
+      const validation = assertWorkingDirectoryAllowed(
+        this.workspaceDir,
+        authorized.request.workingDirectory,
+        this.securityConfig.allowOutsideWorkspace,
+      );
+      canonicalNow = validation.canonicalPath;
+      insideWorkspace = validation.insideWorkspace;
+    } catch (error) {
+      const reason =
+        error instanceof PolicyDeniedError
+          ? error.message
+          : "Working directory no longer passes workspace boundary validation";
+      return {
+        valid: false,
+        reasons: [reason],
+        detectedRisks: ["workspace_escape_toctou"],
+      };
+    }
+
+    const normA = process.platform === "win32" ? canonicalNow.toLowerCase() : canonicalNow;
+    const normB =
+      process.platform === "win32"
+        ? authorized.canonicalWorkingDirectory.toLowerCase()
+        : authorized.canonicalWorkingDirectory;
+
+    if (normA !== normB) {
+      return {
+        valid: false,
+        reasons: [
+          `Working directory canonical target changed between authorization and execution (${authorized.canonicalWorkingDirectory} -> ${canonicalNow})`,
+        ],
+        detectedRisks: ["workspace_symlink_toctou"],
+      };
+    }
+
+    const recheck = this.classifyOperation(authorized.request, canonicalNow, insideWorkspace);
+    if (recheck.level === "DENIED") {
+      return {
+        valid: false,
+        reasons: recheck.reasons,
+        detectedRisks: recheck.detectedRisks,
+      };
+    }
+
+    // If an AUTO authorization escalated to CONDITIONAL/HUMAN_APPROVAL due to state change, reject!
+    if (authorized.policyLevel === "AUTO" && recheck.level !== "AUTO") {
+      return {
+        valid: false,
+        reasons: [
+          "Operation risk level escalated since initial AUTO authorization",
+          ...recheck.reasons,
+        ],
+        detectedRisks: [...recheck.detectedRisks, "policy_escalation_toctou"],
+      };
+    }
+
+    return { valid: true };
+  }
+
+  protected classifyOperation(
     request: Readonly<OperationRequest>,
+    _canonicalWorkingDirectory: string,
     insideWorkspace: boolean,
   ): {
     level: PermissionLevel;

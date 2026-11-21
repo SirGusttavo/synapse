@@ -13,12 +13,14 @@ import type { ExecutionEngine } from "../execution-engine/index.js";
 import type { IPolicyEngine } from "../security/index.js";
 import { redactText } from "../security/redactor.js";
 import { assertValidTaskTransition } from "./state-machine.js";
+import { type LockMode, WorkspaceLock } from "./workspace-lock.js";
 
 export interface TaskManagerOptions {
   taskRepository: ITaskRepository;
   policyEngine: IPolicyEngine;
   executionEngine: ExecutionEngine;
   auditLogger: IAuditLogger;
+  workspaceLock?: WorkspaceLock;
   eventBus?: SynapseEventBus;
 }
 
@@ -46,6 +48,7 @@ export class TaskManager {
   private readonly policyEngine: IPolicyEngine;
   private readonly executionEngine: ExecutionEngine;
   private readonly auditLogger: IAuditLogger;
+  public readonly workspaceLock: WorkspaceLock;
   private readonly eventBus?: SynapseEventBus;
   private readonly activeControllers = new Map<string, AbortController>();
 
@@ -54,6 +57,7 @@ export class TaskManager {
     this.policyEngine = options.policyEngine;
     this.executionEngine = options.executionEngine;
     this.auditLogger = options.auditLogger;
+    this.workspaceLock = options.workspaceLock ?? new WorkspaceLock();
     this.eventBus = options.eventBus;
   }
 
@@ -177,53 +181,139 @@ export class TaskManager {
       }
 
       const { authorized } = evaluation;
-      updateTask({
-        status: "RUNNING",
-        workingDirectory: authorized.canonicalWorkingDirectory,
-        policyLevel: authorized.policyLevel,
-        approvalStatus: authorized.approvalStatus,
-      });
+      const lockMode: LockMode = authorized.mutating ? "write" : "read";
 
-      const result = await this.executionEngine.executeAuthorized(authorized, {
-        signal: controller.signal,
-        timeoutMs: options?.timeoutMs,
-        maxOutputBytes: options?.maxOutputBytes,
-      });
+      let releaseLock: (() => void) | null = null;
+      try {
+        releaseLock = await this.workspaceLock.acquire(
+          authorized.canonicalWorkingDirectory,
+          lockMode,
+          controller.signal,
+        );
+      } catch (lockError) {
+        if (controller.signal.aborted) {
+          const reason = "Task cancelled while waiting for workspace lock";
+          updateTask({
+            status: "CANCELLED",
+            workingDirectory: authorized.canonicalWorkingDirectory,
+            policyLevel: authorized.policyLevel,
+            approvalStatus: authorized.approvalStatus,
+            errorSummary: reason,
+          });
 
-      const finalStatus = mapExecutionStatusToTaskStatus(result.status);
-      const errorSummary =
-        result.errorMessage ??
-        (finalStatus === "FAILED"
-          ? result.stderr.trim() || `Exited with code ${String(result.exitCode)}`
-          : null);
+          auditAttempted = true;
+          this.auditLogger.record({
+            sessionId: request.sessionId,
+            taskId,
+            actor: request.actor,
+            operation: request.toolName,
+            category: request.category,
+            input: request.input,
+            workingDirectory: authorized.canonicalWorkingDirectory,
+            policyLevel: authorized.policyLevel,
+            policyDecision: authorized.policyDecision,
+            approvalStatus: authorized.approvalStatus,
+            approvedBy: authorized.approvedBy,
+            status: "CANCELLED",
+            errorSummary: reason,
+          });
 
-      updateTask({
-        status: finalStatus,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        errorSummary: errorSummary ? redactText(errorSummary.slice(0, 500)) : null,
-      });
+          return { task, result: null, deniedReasons: [reason] };
+        }
+        throw lockError;
+      }
 
-      auditAttempted = true;
-      this.auditLogger.record({
-        sessionId: request.sessionId,
-        taskId,
-        actor: request.actor,
-        operation: request.toolName,
-        category: request.category,
-        input: request.input,
-        workingDirectory: authorized.canonicalWorkingDirectory,
-        policyLevel: authorized.policyLevel,
-        policyDecision: authorized.policyDecision,
-        approvalStatus: authorized.approvalStatus,
-        approvedBy: authorized.approvedBy,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        status: finalStatus,
-        errorSummary,
-      });
+      try {
+        // Directive 9: Re-validate permissions immediately before executing any mutating operation
+        if (authorized.mutating) {
+          const revalidation = this.policyEngine.revalidateAuthorized(authorized);
+          if (!revalidation.valid) {
+            const sanitizedReasons = revalidation.reasons.map((r) => redactText(r));
+            const errorSummary = sanitizedReasons.join("; ");
 
-      return { task, result };
+            updateTask({
+              status: "DENIED",
+              workingDirectory: authorized.canonicalWorkingDirectory,
+              policyLevel: authorized.policyLevel,
+              approvalStatus: authorized.approvalStatus,
+              errorSummary,
+            });
+
+            auditAttempted = true;
+            this.auditLogger.record({
+              sessionId: request.sessionId,
+              taskId,
+              actor: request.actor,
+              operation: request.toolName,
+              category: request.category,
+              input: request.input,
+              workingDirectory: authorized.canonicalWorkingDirectory,
+              policyLevel: authorized.policyLevel,
+              policyDecision: "DENIED",
+              approvalStatus: authorized.approvalStatus,
+              approvedBy: authorized.approvedBy,
+              status: "DENIED",
+              errorSummary,
+            });
+
+            return {
+              task,
+              result: null,
+              deniedReasons: sanitizedReasons,
+            };
+          }
+        }
+
+        updateTask({
+          status: "RUNNING",
+          workingDirectory: authorized.canonicalWorkingDirectory,
+          policyLevel: authorized.policyLevel,
+          approvalStatus: authorized.approvalStatus,
+        });
+
+        const result = await this.executionEngine.executeAuthorized(authorized, {
+          signal: controller.signal,
+          timeoutMs: options?.timeoutMs,
+          maxOutputBytes: options?.maxOutputBytes,
+        });
+
+        const finalStatus = mapExecutionStatusToTaskStatus(result.status);
+        const errorSummary =
+          result.errorMessage ??
+          (finalStatus === "FAILED"
+            ? result.stderr.trim() || `Exited with code ${String(result.exitCode)}`
+            : null);
+
+        updateTask({
+          status: finalStatus,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          errorSummary: errorSummary ? redactText(errorSummary.slice(0, 500)) : null,
+        });
+
+        auditAttempted = true;
+        this.auditLogger.record({
+          sessionId: request.sessionId,
+          taskId,
+          actor: request.actor,
+          operation: request.toolName,
+          category: request.category,
+          input: request.input,
+          workingDirectory: authorized.canonicalWorkingDirectory,
+          policyLevel: authorized.policyLevel,
+          policyDecision: authorized.policyDecision,
+          approvalStatus: authorized.approvalStatus,
+          approvedBy: authorized.approvedBy,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          status: finalStatus,
+          errorSummary,
+        });
+
+        return { task, result };
+      } finally {
+        releaseLock?.();
+      }
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
       const sanitizedError = redactText(rawMessage);

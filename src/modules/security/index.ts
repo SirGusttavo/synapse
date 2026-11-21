@@ -4,6 +4,7 @@ export {
 } from "./command-analyzer.js";
 export { isBlockedEnvKey, sanitizeEnvironment } from "./env-sanitizer.js";
 export {
+  isMutatingOperation,
   NonInteractiveApprovalHandler,
   PolicyEngine,
   type PolicyEngineOptions,
@@ -14,10 +15,12 @@ export {
   type ApprovalResponse,
   AUTHORIZED_OPERATION_BRAND,
   type AuthorizedOperation,
+  computeAuthorizationDigest,
   type IApprovalHandler,
   type IPolicyEngine,
   isAuthorizedOperation,
   type PolicyEvaluationResult,
+  type RevalidationResult,
 } from "./types.js";
 export {
   assertWorkingDirectoryAllowed,
