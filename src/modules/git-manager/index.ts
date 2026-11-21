@@ -3,10 +3,13 @@ export {
   assertSafeCloneUrl,
   assertSafeGitPaths,
   assertSafeGitRef,
+  buildSafeGitGlobalArgs,
+  type DangerousGitConfigViolation,
+  detectDangerousLocalConfigEntries,
+  ensureControlledEmptyHooksDir,
   findSensitiveStagedFiles,
   type GitRepositoryInspection,
   inspectGitRepository,
-  SAFE_GIT_GLOBAL_ARGS,
 } from "./preflight.js";
 export { createGitTools } from "./tools.js";
 export {

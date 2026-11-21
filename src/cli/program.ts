@@ -457,6 +457,83 @@ export function createCliProgram(io: CliIo = DEFAULT_IO): {
     },
   );
 
+  addCommonOptions(
+    gitCmd
+      .command("clone")
+      .description("Clone a remote repository into a workspace subdirectory")
+      .argument("<url>", "Repository URL (https:// or ssh://)")
+      .argument("<directory>", "Target subdirectory inside workspace")
+      .option("-b, --branch <name>", "Branch to checkout")
+      .option("--depth <n>", "Shallow clone depth"),
+  ).action(
+    async (
+      url: string,
+      directory: string,
+      opts: CommonToolOptions & { branch?: string; depth?: string },
+    ) => {
+      await executeRuntimeTool(
+        "git.clone",
+        "git",
+        {
+          url,
+          directory,
+          ...(opts.branch ? { branch: opts.branch } : {}),
+          ...(opts.depth !== undefined ? { depth: Number(opts.depth) } : {}),
+        },
+        opts,
+      );
+    },
+  );
+
+  addCommonOptions(
+    gitCmd
+      .command("pull")
+      .description("Pull changes from a remote repository (fast-forward only by default)")
+      .option("--remote <name>", "Remote name", "origin")
+      .option("--branch <name>", "Branch name")
+      .option("--no-ff-only", "Allow non-fast-forward pull"),
+  ).action(
+    async (opts: CommonToolOptions & { remote: string; branch?: string; ffOnly?: boolean }) => {
+      await executeRuntimeTool(
+        "git.pull",
+        "git",
+        {
+          remote: opts.remote,
+          ...(opts.branch ? { branch: opts.branch } : {}),
+          ffOnly: opts.ffOnly !== false,
+        },
+        opts,
+      );
+    },
+  );
+
+  addCommonOptions(
+    gitCmd
+      .command("merge")
+      .description("Merge a branch into the current branch")
+      .argument("<branch>", "Branch name to merge")
+      .option("--no-ff", "Create a merge commit even on fast-forward")
+      .option("--ff-only", "Refuse merge unless fast-forward")
+      .option("-m, --message <msg>", "Custom merge commit message"),
+  ).action(
+    async (
+      branch: string,
+      opts: CommonToolOptions & { ff?: boolean; ffOnly?: boolean; message?: string },
+    ) => {
+      await executeRuntimeTool(
+        "git.merge",
+        "git",
+        {
+          branch,
+          noFf: opts.ff === false,
+          ffOnly: Boolean(opts.ffOnly),
+          ...(opts.message ? { message: opts.message } : {}),
+        },
+        opts,
+      );
+    },
+  );
+
   program
     .command("status")
     .description("Inspect SYNAPSE runtime environment, shell detection and security baseline")

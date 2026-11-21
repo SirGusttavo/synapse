@@ -1,22 +1,161 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { PolicyDeniedError } from "../../core/errors.js";
 import type { IProcessRunner } from "../execution-engine/process-runner.js";
 import { inspectWorkspacePath, isSensitiveFilePath } from "../security/workspace-guard.js";
 
+const CONTROLLED_EMPTY_HOOKS_DIR = path.join(os.tmpdir(), "synapse-controlled-empty-hooks");
+
+/**
+ * Ensures an absolute, empty, SYNAPSE-controlled directory outside the workspace
+ * exists and is free of symlinks/junctions or injected hook files.
+ * Works uniformly for normal repositories, subdirectories and worktrees (.git as file).
+ */
+export function ensureControlledEmptyHooksDir(): string {
+  if (fs.existsSync(CONTROLLED_EMPTY_HOOKS_DIR)) {
+    const stat = fs.lstatSync(CONTROLLED_EMPTY_HOOKS_DIR);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      fs.rmSync(CONTROLLED_EMPTY_HOOKS_DIR, { recursive: true, force: true });
+      fs.mkdirSync(CONTROLLED_EMPTY_HOOKS_DIR, { recursive: true, mode: 0o700 });
+    } else {
+      for (const entry of fs.readdirSync(CONTROLLED_EMPTY_HOOKS_DIR)) {
+        fs.rmSync(path.join(CONTROLLED_EMPTY_HOOKS_DIR, entry), { recursive: true, force: true });
+      }
+    }
+  } else {
+    fs.mkdirSync(CONTROLLED_EMPTY_HOOKS_DIR, { recursive: true, mode: 0o700 });
+  }
+  return CONTROLLED_EMPTY_HOOKS_DIR;
+}
+
 /**
  * Mandatory Git containment flags passed to every Git invocation:
- * - disables arbitrary repository hooks (.git/hooks/*)
+ * - forces `core.hooksPath` to an absolute empty directory outside the workspace
  * - disables fsmonitor daemon execution
- * - disables git-remote-ext arbitrary command protocol
+ * - disables interactive pagers and editors
+ * - disables arbitrary command/local-filesystem transports (`ext::`, `file://`)
  */
-export const SAFE_GIT_GLOBAL_ARGS: readonly string[] = [
-  "-c",
-  "core.hooksPath=.git/__synapse_disabled_hooks__",
-  "-c",
-  "core.fsmonitor=false",
-  "-c",
-  "protocol.ext.allow=never",
+export function buildSafeGitGlobalArgs(): string[] {
+  const emptyHooksDir = ensureControlledEmptyHooksDir();
+  return [
+    "-c",
+    `core.hooksPath=${emptyHooksDir}`,
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "core.editor=false",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "protocol.file.allow=never",
+  ];
+}
+
+/**
+ * Local/worktree `.git/config` keys that can trigger arbitrary command execution,
+ * credential exfiltration or transport hijacking when supplied by an untrusted repository.
+ * Note: system and global scopes (e.g. Git Credential Manager, global Git LFS) remain allowed.
+ */
+const DANGEROUS_LOCAL_CONFIG_KEY_PATTERNS: ReadonlyArray<{
+  pattern: RegExp;
+  reason: string;
+}> = [
+  {
+    pattern: /^filter\..+\.(?:clean|smudge|process)$/i,
+    reason: "Repository-local filter driver (clean/smudge/process) can execute arbitrary commands",
+  },
+  {
+    pattern: /^diff\.external$|^diff\..+\.(?:command|textconv)$/i,
+    reason: "Repository-local external diff or textconv driver can execute arbitrary commands",
+  },
+  {
+    pattern: /^merge\..+\.driver$/i,
+    reason: "Repository-local custom merge driver can execute arbitrary commands",
+  },
+  {
+    pattern: /^core\.(?:sshcommand|gitproxy|askpass|fsmonitor|hookspath|pager|editor)$/i,
+    reason: "Repository-local core execution override is forbidden",
+  },
+  {
+    pattern: /^credential(?:\..+)?\.helper$/i,
+    reason: "Repository-local credential.helper override is forbidden (use system/global auth)",
+  },
+  {
+    pattern: /^url\..+\.(?:insteadof|pushinsteadof)$/i,
+    reason: "Repository-local URL rewrite (insteadOf / pushInsteadOf) is forbidden",
+  },
+  {
+    pattern: /^remote\..+\.(?:uploadpack|receivepack|proxy|vcs)$/i,
+    reason: "Repository-local remote transport command override is forbidden",
+  },
+  {
+    pattern: /^alias\..+$/i,
+    reason: "Repository-local Git aliases are forbidden",
+  },
+  {
+    pattern: /^include\.path$|^includeif\..+\.path$/i,
+    reason: "Repository-local config include directives are forbidden",
+  },
+  {
+    pattern: /^protocol(?:\..+)?\.allow$/i,
+    reason: "Repository-local protocol.allow override is forbidden",
+  },
+  {
+    pattern: /^init\.templatedir$/i,
+    reason: "Repository-local init.templateDir override is forbidden",
+  },
+  {
+    pattern: /^gpg(?:\..+)?\.program$/i,
+    reason: "Repository-local gpg.program override is forbidden",
+  },
 ];
+
+export interface DangerousGitConfigViolation {
+  scope: "local" | "worktree";
+  key: string;
+  reason: string;
+}
+
+export function detectDangerousLocalConfigEntries(
+  scopedConfigOutput: string,
+): DangerousGitConfigViolation[] {
+  const violations: DangerousGitConfigViolation[] = [];
+  const lines = scopedConfigOutput.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    if (rawLine.trim().length === 0) {
+      continue;
+    }
+    const tabIdx = rawLine.indexOf("\t");
+    if (tabIdx <= 0) {
+      continue;
+    }
+    const scope = rawLine.slice(0, tabIdx).trim().toLowerCase();
+    if (scope !== "local" && scope !== "worktree") {
+      continue;
+    }
+
+    const rest = rawLine.slice(tabIdx + 1);
+    const eqIdx = rest.indexOf("=");
+    const key = (eqIdx >= 0 ? rest.slice(0, eqIdx) : rest).trim().toLowerCase();
+
+    for (const rule of DANGEROUS_LOCAL_CONFIG_KEY_PATTERNS) {
+      if (rule.pattern.test(key)) {
+        violations.push({
+          scope,
+          key,
+          reason: rule.reason,
+        });
+        break;
+      }
+    }
+  }
+
+  return violations;
+}
 
 const INVALID_REF_CHARS = /[\0-\x20~^:?*[\\]|(?:\.\.)|(?:\.lock$)|(?:@\{)|(?:\/\/)/;
 
@@ -118,6 +257,7 @@ export interface GitRepositoryInspection {
   isClean: boolean;
   hasConflicts: boolean;
   stagedFiles: string[];
+  configViolations: DangerousGitConfigViolation[];
 }
 
 export async function inspectGitRepository(
@@ -125,9 +265,11 @@ export async function inspectGitRepository(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<GitRepositoryInspection> {
+  const safeGlobalArgs = buildSafeGitGlobalArgs();
+
   const revParse = await processRunner.run({
     executable: "git",
-    args: [...SAFE_GIT_GLOBAL_ARGS, "rev-parse", "--is-inside-work-tree"],
+    args: [...safeGlobalArgs, "rev-parse", "--is-inside-work-tree"],
     cwd,
     timeoutMs: 5_000,
     maxOutputBytes: 4_096,
@@ -141,12 +283,35 @@ export async function inspectGitRepository(
       isClean: false,
       hasConflicts: false,
       stagedFiles: [],
+      configViolations: [],
+    };
+  }
+
+  // Inspect repository-local and worktree config BEFORE running any command that touches index/working-tree
+  const configRes = await processRunner.run({
+    executable: "git",
+    args: [...safeGlobalArgs, "config", "--list", "--show-scope"],
+    cwd,
+    timeoutMs: 5_000,
+    maxOutputBytes: 65_536,
+    signal,
+  });
+
+  const configViolations = detectDangerousLocalConfigEntries(configRes.stdout);
+  if (configViolations.length > 0) {
+    return {
+      isRepo: true,
+      currentBranch: null,
+      isClean: false,
+      hasConflicts: false,
+      stagedFiles: [],
+      configViolations,
     };
   }
 
   const branchRes = await processRunner.run({
     executable: "git",
-    args: [...SAFE_GIT_GLOBAL_ARGS, " symbolic-ref", "--short", "-q", "HEAD"].map((s) => s.trim()),
+    args: [...safeGlobalArgs, "symbolic-ref", "--short", "-q", "HEAD"],
     cwd,
     timeoutMs: 5_000,
     maxOutputBytes: 4_096,
@@ -156,7 +321,7 @@ export async function inspectGitRepository(
 
   const statusRes = await processRunner.run({
     executable: "git",
-    args: [...SAFE_GIT_GLOBAL_ARGS, "status", "--porcelain"],
+    args: [...safeGlobalArgs, "status", "--porcelain"],
     cwd,
     timeoutMs: 5_000,
     maxOutputBytes: 65_536,
@@ -169,7 +334,7 @@ export async function inspectGitRepository(
 
   const stagedRes = await processRunner.run({
     executable: "git",
-    args: [...SAFE_GIT_GLOBAL_ARGS, "diff", "--cached", "--name-only"],
+    args: [...safeGlobalArgs, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only"],
     cwd,
     timeoutMs: 5_000,
     maxOutputBytes: 65_536,
@@ -187,6 +352,7 @@ export async function inspectGitRepository(
     isClean,
     hasConflicts,
     stagedFiles,
+    configViolations: [],
   };
 }
 

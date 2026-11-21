@@ -7,9 +7,10 @@ import {
   assertSafeCloneUrl,
   assertSafeGitPaths,
   assertSafeGitRef,
+  buildSafeGitGlobalArgs,
+  ensureControlledEmptyHooksDir,
   findSensitiveStagedFiles,
   inspectGitRepository,
-  SAFE_GIT_GLOBAL_ARGS,
 } from "./preflight.js";
 import type {
   GitAddInput,
@@ -65,9 +66,10 @@ export class GitManager {
     context: ToolExecutionContext,
     extraData?: Record<string, unknown>,
   ): Promise<ExecutionResult> {
+    const safeGlobalArgs = buildSafeGitGlobalArgs();
     const res = await this.processRunner.run({
       executable: "git",
-      args: [...SAFE_GIT_GLOBAL_ARGS, ...subArgs],
+      args: [...safeGlobalArgs, ...subArgs],
       cwd: context.workingDirectory,
       timeoutMs: context.timeoutMs,
       maxOutputBytes: context.maxOutputBytes,
@@ -105,6 +107,18 @@ export class GitManager {
         ),
       };
     }
+    if (state.configViolations.length > 0) {
+      const summary = state.configViolations
+        .map((v) => `${v.scope}:${v.key} (${v.reason})`)
+        .join("; ");
+      return {
+        ok: false,
+        result: preflightFailure(
+          startedAt,
+          `Blocked dangerous repository-local Git configuration: ${summary}`,
+        ),
+      };
+    }
     return { ok: true, state };
   }
 
@@ -131,7 +145,8 @@ export class GitManager {
       return check.result;
     }
 
-    const args: string[] = ["diff"];
+    // Pass --no-ext-diff and --no-textconv so even global diff drivers cannot execute unexpectedly
+    const args: string[] = ["diff", "--no-ext-diff", "--no-textconv"];
     if (input.staged) {
       args.push("--cached");
     }
@@ -196,7 +211,6 @@ export class GitManager {
       return this.runGit(args, context);
     }
 
-    // Safe delete (-d, never -D force delete!)
     if (check.state.currentBranch === input.name) {
       return preflightFailure(
         startedAt,
@@ -241,7 +255,11 @@ export class GitManager {
 
   public async init(input: GitInitInput, context: ToolExecutionContext): Promise<ExecutionResult> {
     assertSafeGitRef(input.initialBranch, "initialBranch");
-    return this.runGit(["init", "-b", input.initialBranch], context);
+    const emptyTemplateDir = ensureControlledEmptyHooksDir();
+    return this.runGit(
+      ["init", `--template=${emptyTemplateDir}`, "-b", input.initialBranch],
+      context,
+    );
   }
 
   public async clone(
@@ -272,7 +290,9 @@ export class GitManager {
       );
     }
 
-    const args: string[] = ["clone"];
+    const emptyTemplateDir = ensureControlledEmptyHooksDir();
+    // Never pass --recurse-submodules and always force an empty template directory
+    const args: string[] = ["clone", `--template=${emptyTemplateDir}`];
     if (input.branch) {
       assertSafeGitRef(input.branch, "clone branch");
       args.push("--branch", input.branch);
@@ -373,7 +393,7 @@ export class GitManager {
     }
 
     assertSafeGitRef(input.remote, "remote");
-    const args: string[] = ["pull"];
+    const args: string[] = ["pull", "--no-recurse-submodules"];
     if (input.ffOnly) {
       args.push("--ff-only");
     }
