@@ -24,7 +24,13 @@ export {
 } from "./types.js";
 export {
   assertWorkingDirectoryAllowed,
+  inspectWorkspacePath,
+  isInternalGitPath,
   isPathWithinWorkspace,
+  isSensitiveConfigPath,
   isSensitiveFilePath,
+  isWorkspaceRootPath,
+  type ResolvedWorkspacePath,
+  resolveCanonicalPath,
   type WorkingDirectoryValidation,
 } from "./workspace-guard.js";

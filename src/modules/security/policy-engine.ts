@@ -15,7 +15,7 @@ import {
   type PolicyEvaluationResult,
   type RevalidationResult,
 } from "./types.js";
-import { assertWorkingDirectoryAllowed } from "./workspace-guard.js";
+import { assertWorkingDirectoryAllowed, inspectWorkspacePath } from "./workspace-guard.js";
 
 function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== "object") {
@@ -313,12 +313,22 @@ export class PolicyEngine implements IPolicyEngine {
       };
     }
 
-    // If an AUTO authorization escalated to CONDITIONAL/HUMAN_APPROVAL due to state change, reject!
+    // If an AUTO or CONDITIONAL authorization escalated to a higher risk level (e.g., via symlink swap), reject!
     if (authorized.policyLevel === "AUTO" && recheck.level !== "AUTO") {
       return {
         valid: false,
         reasons: [
           "Operation risk level escalated since initial AUTO authorization",
+          ...recheck.reasons,
+        ],
+        detectedRisks: [...recheck.detectedRisks, "policy_escalation_toctou"],
+      };
+    }
+    if (authorized.policyLevel === "CONDITIONAL" && recheck.level === "HUMAN_APPROVAL") {
+      return {
+        valid: false,
+        reasons: [
+          "Operation risk level escalated from CONDITIONAL to HUMAN_APPROVAL before execution",
           ...recheck.reasons,
         ],
         detectedRisks: [...recheck.detectedRisks, "policy_escalation_toctou"],
@@ -330,7 +340,7 @@ export class PolicyEngine implements IPolicyEngine {
 
   protected classifyOperation(
     request: Readonly<OperationRequest>,
-    _canonicalWorkingDirectory: string,
+    canonicalWorkingDirectory: string,
     insideWorkspace: boolean,
   ): {
     level: PermissionLevel;
@@ -347,13 +357,8 @@ export class PolicyEngine implements IPolicyEngine {
         reasons: analysis.reasons,
         detectedRisks: analysis.detectedRisks,
       };
-    } else if (request.category === "file" && request.toolName === "file.delete") {
-      // D-06: Single file deletion defaults to HUMAN_APPROVAL
-      base = {
-        level: this.securityConfig.singleFileDeletePermission,
-        reasons: ["Single file deletion requires human approval by policy (D-06)"],
-        detectedRisks: ["file_deletion"],
-      };
+    } else if (request.category === "file") {
+      base = this.classifyFileOperation(request, canonicalWorkingDirectory);
     } else {
       // RNF-01: Strict deny-by-default for unmapped/unknown operations
       return {
@@ -373,5 +378,163 @@ export class PolicyEngine implements IPolicyEngine {
     }
 
     return base;
+  }
+
+  private classifyFileOperation(
+    request: Readonly<OperationRequest>,
+    canonicalWorkingDirectory: string,
+  ): {
+    level: PermissionLevel;
+    reasons: string[];
+    detectedRisks: string[];
+  } {
+    const mutating = isMutatingOperation(request);
+    const candidatePaths: string[] = [];
+
+    if (request.toolName === "file.move") {
+      if (typeof request.input.from !== "string" || typeof request.input.to !== "string") {
+        return {
+          level: "DENIED",
+          reasons: ["file.move requires valid 'from' and 'to' string paths"],
+          detectedRisks: ["invalid_file_path"],
+        };
+      }
+      candidatePaths.push(request.input.from, request.input.to);
+    } else if (request.toolName === "file.list" || request.toolName === "file.search") {
+      const target = typeof request.input.path === "string" ? request.input.path : ".";
+      candidatePaths.push(target);
+    } else if (
+      request.toolName === "file.read" ||
+      request.toolName === "file.create" ||
+      request.toolName === "file.edit" ||
+      request.toolName === "file.delete"
+    ) {
+      if (typeof request.input.path !== "string" || request.input.path.trim().length === 0) {
+        return {
+          level: "DENIED",
+          reasons: [`${request.toolName} requires a non-empty 'path' string`],
+          detectedRisks: ["invalid_file_path"],
+        };
+      }
+      candidatePaths.push(request.input.path);
+    } else {
+      return {
+        level: "DENIED",
+        reasons: [`Unmapped file operation '${request.toolName}' is denied by default policy`],
+        detectedRisks: ["unmapped_operation"],
+      };
+    }
+
+    let touchesOutsideWorkspace = false;
+    let touchesSensitiveConfig = false;
+
+    for (const rawPath of candidatePaths) {
+      try {
+        const info = inspectWorkspacePath(this.workspaceDir, canonicalWorkingDirectory, rawPath);
+
+        if (!info.insideWorkspace) {
+          if (!this.securityConfig.allowOutsideWorkspace) {
+            return {
+              level: "DENIED",
+              reasons: [`File path escapes authorized workspace: ${rawPath}`],
+              detectedRisks: ["workspace_escape"],
+            };
+          }
+          touchesOutsideWorkspace = true;
+        }
+
+        if (info.isSensitive) {
+          return {
+            level: "DENIED",
+            reasons: [`Access to sensitive credential/secret file is blocked: ${rawPath}`],
+            detectedRisks: ["sensitive_file_access"],
+          };
+        }
+
+        if (mutating && info.isInternalGit) {
+          return {
+            level: "DENIED",
+            reasons: [`Direct mutation of internal .git directory is blocked: ${rawPath}`],
+            detectedRisks: ["internal_git_mutation"],
+          };
+        }
+
+        if (mutating && info.isWorkspaceRoot) {
+          return {
+            level: "DENIED",
+            reasons: ["Mutating or deleting the workspace root directory is blocked"],
+            detectedRisks: ["workspace_root_mutation"],
+          };
+        }
+
+        if (mutating && info.isSensitiveConfig) {
+          touchesSensitiveConfig = true;
+        }
+      } catch (error) {
+        const message =
+          error instanceof PolicyDeniedError ? error.message : `Invalid file path: ${rawPath}`;
+        return {
+          level: "DENIED",
+          reasons: [message],
+          detectedRisks: ["invalid_file_path"],
+        };
+      }
+    }
+
+    if (touchesOutsideWorkspace) {
+      return {
+        level: "HUMAN_APPROVAL",
+        reasons: ["File operation targets a path outside the workspace"],
+        detectedRisks: ["outside_workspace"],
+      };
+    }
+
+    if (touchesSensitiveConfig) {
+      return {
+        level: "HUMAN_APPROVAL",
+        reasons: ["Modifying SYNAPSE configuration or policy files requires human approval"],
+        detectedRisks: ["sensitive_config_modification"],
+      };
+    }
+
+    switch (request.toolName) {
+      case "file.list":
+      case "file.read":
+      case "file.search":
+      case "file.create":
+      case "file.edit":
+        return {
+          level: "AUTO",
+          reasons: [`${request.toolName} is permitted within the authorized workspace`],
+          detectedRisks: [],
+        };
+      case "file.move":
+        return {
+          level: "CONDITIONAL",
+          reasons: ["Moving or renaming files requires conditional validation/approval"],
+          detectedRisks: ["file_move"],
+        };
+      case "file.delete": {
+        const isRecursive = request.input.recursive === true;
+        const level: PermissionLevel = isRecursive
+          ? "HUMAN_APPROVAL"
+          : this.securityConfig.singleFileDeletePermission;
+        return {
+          level,
+          reasons: [
+            isRecursive
+              ? "Directory deletion requires explicit human approval"
+              : "Single file deletion requires human approval by policy (D-06)",
+          ],
+          detectedRisks: [isRecursive ? "directory_deletion" : "file_deletion"],
+        };
+      }
+      default:
+        return {
+          level: "DENIED",
+          reasons: [`Unmapped file operation '${request.toolName}' is denied`],
+          detectedRisks: ["unmapped_operation"],
+        };
+    }
   }
 }

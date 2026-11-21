@@ -325,7 +325,7 @@ describe("Adversarial Audit — ProcessRunner, PowerShellAdapter & TaskManager r
       executable: treeInv.executable,
       args: treeInv.args,
       cwd: process.cwd(),
-      timeoutMs: 1_800,
+      timeoutMs: 4_500,
       maxOutputBytes: 4_096,
     });
     expect(treeRes.status).toBe("timed_out");

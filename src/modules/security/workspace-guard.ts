@@ -16,6 +16,10 @@ const SENSITIVE_BASENAME_PATTERNS: readonly RegExp[] = [
 
 const SENSITIVE_PATH_SEGMENTS = new Set([".ssh", ".gnupg", ".aws", ".azure"]);
 
+const SENSITIVE_CONFIG_PATTERNS: readonly RegExp[] = [
+  /^\.synapse[\\/]+(?:config|policy)\.jsonc?$/i,
+];
+
 const UNC_OR_DEVICE_PREFIX = /^[/\\]{2}/;
 
 function containsNullByte(value: string): boolean {
@@ -37,7 +41,7 @@ function normalizeForComparison(filePath: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function resolveCanonicalPath(targetPath: string): string {
+export function resolveCanonicalPath(targetPath: string): string {
   const resolved = path.resolve(targetPath);
 
   if (fs.existsSync(resolved)) {
@@ -88,6 +92,38 @@ export function isSensitiveFilePath(targetPath: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isInternalGitPath(targetPath: string): boolean {
+  const check = (p: string) =>
+    path
+      .resolve(p)
+      .split(path.sep)
+      .some((segment) => segment.toLowerCase() === ".git");
+
+  if (check(targetPath)) {
+    return true;
+  }
+  try {
+    return check(resolveCanonicalPath(targetPath));
+  } catch {
+    return false;
+  }
+}
+
+export function isSensitiveConfigPath(workspaceDir: string, targetPath: string): boolean {
+  const canonicalWs = resolveCanonicalPath(workspaceDir);
+  const canonicalTarget = resolveCanonicalPath(path.resolve(workspaceDir, targetPath));
+  const rel = path.relative(canonicalWs, canonicalTarget);
+  return SENSITIVE_CONFIG_PATTERNS.some((pattern) => pattern.test(rel));
+}
+
+export function isWorkspaceRootPath(workspaceDir: string, targetPath: string): boolean {
+  const canonicalWs = normalizeForComparison(resolveCanonicalPath(workspaceDir));
+  const canonicalTarget = normalizeForComparison(
+    resolveCanonicalPath(path.resolve(workspaceDir, targetPath)),
+  );
+  return canonicalWs === canonicalTarget;
 }
 
 export function isPathWithinWorkspace(workspaceDir: string, targetPath: string): boolean {
@@ -147,5 +183,45 @@ export function assertWorkingDirectoryAllowed(
   return {
     canonicalPath: resolveCanonicalPath(resolved),
     insideWorkspace,
+  };
+}
+
+export interface ResolvedWorkspacePath {
+  canonicalPath: string;
+  insideWorkspace: boolean;
+  isSensitive: boolean;
+  isInternalGit: boolean;
+  isSensitiveConfig: boolean;
+  isWorkspaceRoot: boolean;
+}
+
+export function inspectWorkspacePath(
+  workspaceDir: string,
+  baseDir: string,
+  targetPath: string,
+): ResolvedWorkspacePath {
+  if (containsNullByte(targetPath)) {
+    throw new PolicyDeniedError("Target path contains invalid null byte", {
+      details: { targetPath },
+    });
+  }
+
+  const resolved = path.resolve(baseDir, targetPath);
+  if (isUncOrDevicePath(targetPath, resolved)) {
+    throw new PolicyDeniedError("UNC and device paths are blocked by workspace policy", {
+      details: { targetPath, resolved },
+    });
+  }
+
+  const canonicalPath = resolveCanonicalPath(resolved);
+  const insideWorkspace = isPathWithinWorkspace(workspaceDir, resolved);
+
+  return {
+    canonicalPath,
+    insideWorkspace,
+    isSensitive: isSensitiveFilePath(resolved),
+    isInternalGit: isInternalGitPath(resolved),
+    isSensitiveConfig: isSensitiveConfigPath(workspaceDir, resolved),
+    isWorkspaceRoot: isWorkspaceRootPath(workspaceDir, resolved),
   };
 }
