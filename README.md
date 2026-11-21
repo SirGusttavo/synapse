@@ -8,8 +8,8 @@
 
 ## Status do Projeto
 
-- **Fase atual:** Fase 0 — Discovery e Arquitetura
-- **Estado:** Documentação arquitetural concluída para revisão e aprovação antes da Fase 1 (Core).
+- **Fase atual:** Fase 1 — Core (em desenvolvimento)
+- **Fase 0:** Concluída e aprovada (decisões D-01 a D-06 registradas em [08 — Decisões Arquiteturais](docs/08-decisoes-pendentes.md)).
 - **Repositório oficial:** `https://github.com/SirGusttavo/synapse.git`
 
 ## O que é o SYNAPSE
