@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local secrets & environment files (D-03)
+.env
+.env.*
+!.env.example
+
+# SYNAPSE local runtime state (SQLite DB, WAL files, logs)
+.synapse/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
